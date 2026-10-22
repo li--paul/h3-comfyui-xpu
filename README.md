@@ -173,6 +173,6 @@ vendored in `h3_input/`. Expect ~11 min on one Arc Pro B60 (8 steps at ~70 s/ste
 - `vendor/vllm-omni/` — vllm-omni `v0.32.0rc1` source checkout (path source)
 - `vendor/ComfyUI/` — ComfyUI source checkout (run in place)
 - `h3_input/` — MiniMax-H3 custom nodes, API workflow, and reference assets
-- `h3_output/` — H3 test renders (gitignored)
+- `h3_output/` — H3 test renders (sample output committed; `server.log` ignored)
 - `pyproject.toml` — declarative environment + `uv.lock`
 - `setup.sh` — one-command setup (oneAPI env + `uv sync`)
