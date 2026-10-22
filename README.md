@@ -19,6 +19,13 @@ so rebuilding from scratch is just:
 bash setup.sh
 ```
 
+System prerequisite (not handled by `setup.sh`): FFmpeg **shared** libraries, which
+`torchcodec` dlopens at import time:
+
+```bash
+sudo apt install -y ffmpeg     # Ubuntu 26.04 ships FFmpeg 8 (libavutil.so.60)
+```
+
 `setup.sh` only loads the Intel oneAPI toolchain (needed to build vllm for
 XPU) and then runs `uv sync`. On hosts where oneAPI is already sourced
 globally, `uv sync` alone suffices (as long as the `vendor/` checkouts exist;

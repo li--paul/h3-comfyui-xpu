@@ -87,9 +87,13 @@ Don't "simplify" these away — each mirrors the official vLLM-Omni XPU Docker b
   contain `openai_harmony/`, so this is cache corruption, not a bad release.
 - **`output/` missing** crashes `ltx_server.py` at import (see below), and `ltx-gen.sh` only
   creates it at generation time — run `mkdir -p output` before the server.
-- **`torchcodec` cannot load** unless the host has system FFmpeg shared libs. This host has none
-  (`libavutil.so.*` absent, no `ffmpeg` binary), so `torchcodec` import fails. Video files are
-  still produced through `imageio-ffmpeg`; verify them with **PyAV** (`import av`), not torchcodec.
+- **`torchcodec` needs system FFmpeg shared libraries**, not just the static binary that
+  `imageio-ffmpeg` provides. Without them `import torchcodec` dies on
+  `libavutil.so.60: cannot open shared object file` (the wheel tries `core4..8.so` and only the
+  matching FFmpeg major works). Fixed here with `sudo apt install ffmpeg` — Ubuntu 26.04 ships
+  FFmpeg 8 → `libavutil.so.60`, which the wheel's `core8.so` loads. On a fresh host check
+  `ldconfig -p | grep libavutil` before blaming torchcodec. `setup.sh` does not install system
+  packages, so this is a manual prerequisite.
 - **LTX `RuntimeError: Input type (float) and bias type (c10::BFloat16)`** means the vocoder
   fp32 patch is no longer applied. Upstream moved the file from
   `packages/ltx-pipelines/src/ltx_pipelines/utils/blocks.py` to
