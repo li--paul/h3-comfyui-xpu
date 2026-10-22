@@ -5,6 +5,9 @@
 > 环境：`uv_scaffolding_xpu`（torch 2.12 + vLLM 0.26 + vllm-xpu-kernels，全新 uv sync）
 > 模型：Qwen3.6-27B，TP=8（GPU0-7，根端口 0a + 22）
 
+> **备注（2026-10）**：主环境已升级到 torch 2.14 + vLLM 0.32，`run_vllm_tp.sh` 也改用
+> `vllm serve` 入口。下面的复现数据仍来自 2.12 / 0.26 时代，结论未在新版本上重新验证。
+
 ## 1. 环境搭建
 
 ```bash

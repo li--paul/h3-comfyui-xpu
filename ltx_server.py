@@ -29,6 +29,9 @@ ROOT = Path(__file__).resolve().parent
 GEN_SCRIPT = ROOT / "ltx-gen.sh"
 STATIC_DIR = ROOT / "static"
 OUTPUT_DIR = ROOT / "output"
+# StaticFiles raises at import time if the directory is missing, and `output/` is
+# not tracked in git, so a fresh clone would fail to start the server.
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 MAX_LOG_LINES = 3000
 LOG_POLL = 0.5

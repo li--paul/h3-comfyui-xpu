@@ -24,7 +24,8 @@ CUSTOM_NODES="$ROOT/vendor/ComfyUI/custom_nodes/ComfyUI-H3-Motion-Context"
 
 # LTX-2 (Lightricks) test env. Its own separate venv (isolates the transformers
 # version and any CUDA-only extras from the main .venv), reusing the XPU torch
-# stack from the pytorch-xpu index.
+# stack from the pytorch-xpu index. It deliberately stays on torch 2.12 while
+# the main .venv moves ahead: upstream LTX-2 is untested on 2.14.
 #
 # The LTX-2 repo's own packages/ltx-core/pyproject.toml declares
 #   [tool.uv.sources] torch = { index = "torch" }  # -> cu132 index
@@ -94,5 +95,17 @@ fi
 # Install CPython 3.12 (required by vllm-omni) and sync the environment.
 uv python install 3.12
 uv sync
+
+# Video output directory: untracked, but StaticFiles mounting in ltx_server.py
+# requires it to exist at import time.
+mkdir -p "$ROOT/output"
+
+# torchcodec dlopens FFmpeg shared libraries by soname. setup.sh does not install
+# system packages, so warn instead of failing later with an opaque error.
+if ! ldconfig -p 2>/dev/null | grep -q 'libavutil\.so'; then
+    echo
+    echo "WARNING: no FFmpeg shared libraries found; torchcodec will fail to import." >&2
+    echo "         Install them with: sudo apt install -y ffmpeg" >&2
+fi
 
 echo "Setup complete. Virtual env: $ROOT/.venv"

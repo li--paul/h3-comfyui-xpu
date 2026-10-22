@@ -105,9 +105,14 @@ Don't "simplify" these away — each mirrors the official vLLM-Omni XPU Docker b
 
 ## Runtime environment requirements (opposite per script — do not "fix")
 
-- `run_vllm_tp.sh` deliberately **excludes** oneAPI `bin` from `PATH` and unsets `LD_LIBRARY_PATH`,
-  so triton JIT-compiles against the venv's `libsycl.so.8`. It also wipes `~/.triton/cache` first.
-  A stale cache (JIT artifacts bound to system `libsycl.so.9`) segfaults. Keep both behaviours.
+- `run_vllm_tp.sh` keeps oneAPI `bin` off `PATH` so triton uses the venv's `intel-sycl-rt`, and
+  wipes `~/.triton/cache` first — stale JIT artifacts are bound to a specific libsycl ABI and
+  segfault. Since `intel-sycl-rt` 2026.1 the venv ships `libsycl.so.9`, the same major as system
+  oneAPI, so the old `.8`-vs-`.9` isolation is no longer needed; keep the cache wipe anyway.
+- **TP>1 silently requires oneCCL.** Without `CCL_ROOT` *and* `LD_LIBRARY_PATH` pointing at
+  `.venv/lib`, engine startup dies with `oneCCL could not be initialized! Could not load any
+  plugin`. The wheel keeps the real `libccl.so` in `.venv/lib/` and only `libccl.a` in
+  `lib/ccl/cpu/lib/`, so pointing `CCL_ROOT` at the "documented" plugin path still fails.
 - `ltx-gen.sh` / `run-ltx-server.sh` deliberately **source** `/opt/intel/oneapi/setvars.sh`.
 - oneAPI env scripts aren't `set -u` safe; they wrap sourcing in `set +u` / `set -u`.
 
