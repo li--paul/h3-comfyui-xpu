@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.DS_Store
+Thumbs.db
+*.log
+
+# 临时验证脚本（不得上传）
+_check.py
+_verify*.py

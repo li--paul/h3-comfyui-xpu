@@ -1,0 +1,478 @@
+"""H3 video VAE decode with spatial-tile / output-device knobs.
+
+Stock VAEDecode / VAEDecodeTiled cannot change MiniMaxH3VideoVAE.tile_size
+(decode_tiled ignores kwargs). This node snapshots those flags, decodes, then
+restores them so the rest of the graph is unchanged.
+
+H3's reference decoder is 256px tiles with 64px overlap. Larger tiles need the
+same overlap *ratio* (tile/4) or seams look like a block grid. Comfy's VAE.decode
+OOM path also falls back to a generic 3D tiler that ignores H3's blend rules —
+this node calls the H3 decoder directly so that fallback cannot silently ruin quality.
+"""
+
+from __future__ import annotations
+
+import math
+import torch
+import torch.nn.functional as F
+
+import comfy.model_management as model_management
+
+from .utils import extract_tensor
+
+_H3_VAE_ATTRS = ("tiling", "tile_size", "tile_overlap_min")
+_H3_TILE_MULTIPLE = 16  # native spatial VAE ratio
+_STOCK_TILE = 256
+_STOCK_OVERLAP = 64
+
+
+def _h3_video_vae(vae):
+    inner = getattr(vae, "first_stage_model", None)
+    if inner is None or not all(hasattr(inner, name) for name in _H3_VAE_ATTRS):
+        raise ValueError(
+            "MiniMax H3 VAE Decode (fast) expects the MiniMax H3 *video* VAE. "
+            "Connect the video VAE, not the audio VAE."
+        )
+    return inner
+
+
+def _video_latent(samples: dict) -> torch.Tensor:
+    if "samples" not in samples:
+        raise KeyError('LATENT dict missing "samples"')
+    members, _ = extract_tensor(samples["samples"])
+    video = members[0]
+    if video.ndim != 5:
+        raise ValueError(
+            f"Expected H3 video latent BxCxTxHxW, got shape {tuple(video.shape)}"
+        )
+    return video
+
+
+def _snap_multiple(value: int, multiple: int, minimum: int) -> int:
+    value = max(int(minimum), int(value))
+    return max(minimum, (value // multiple) * multiple)
+
+
+def _effective_overlap(tile_size: int, tile_overlap: int) -> int:
+    """Keep at least the stock 64/256 overlap ratio so larger tiles do not seam."""
+    scaled = max(_STOCK_OVERLAP, (int(tile_size) * _STOCK_OVERLAP) // _STOCK_TILE)
+    overlap = max(int(tile_overlap), scaled)
+    overlap = _snap_multiple(overlap, _H3_TILE_MULTIPLE, _H3_TILE_MULTIPLE)
+    return min(overlap, max(_H3_TILE_MULTIPLE, tile_size - _H3_TILE_MULTIPLE))
+
+
+def _decoder_channel_packing(inner) -> tuple[int, int]:
+    """Infer packed output channels and PixelShuffle factor from projection rows."""
+    decoder = inner.decoder
+    rows = int(decoder.proj_out.weight.shape[0])
+    temporal = int(decoder.patch_size_t)
+    spatial = int(decoder.patch_size)
+    native_channels = 3
+    patch_volume = temporal * spatial * spatial
+    if rows % patch_volume:
+        raise ValueError(
+            f"H3 decoder projection has {rows} rows, not divisible by its "
+            f"temporal/spatial patch volume {patch_volume}."
+        )
+    packed_channels = rows // patch_volume
+    if packed_channels % native_channels:
+        raise ValueError(
+            f"H3 decoder projection implies {packed_channels} output channels, "
+            f"not divisible by {native_channels} RGB channels."
+        )
+    ratio_squared = packed_channels // native_channels
+    ratio = math.isqrt(ratio_squared)
+    if ratio * ratio != ratio_squared:
+        raise ValueError(
+            f"H3 decoder's {packed_channels} packed channels do not form a "
+            "square PixelShuffle ratio."
+        )
+    return packed_channels, ratio
+
+
+def _shape_or_none(value):
+    if value is None:
+        return None
+    shape = getattr(value, "shape", None)
+    return tuple(shape) if shape is not None else None
+
+
+def _debug_vae_load_state(vae, label: str) -> None:
+    """Print the H3 decoder geometry and Comfy patcher state for DVRAM diagnosis."""
+    inner = getattr(vae, "first_stage_model", None)
+    decoder = getattr(inner, "decoder", None) if inner is not None else None
+    proj_out = getattr(decoder, "proj_out", None) if decoder is not None else None
+    weight = getattr(proj_out, "weight", None) if proj_out is not None else None
+    bias = getattr(proj_out, "bias", None) if proj_out is not None else None
+    patcher = getattr(vae, "patcher", None)
+
+    try:
+        is_dynamic = patcher.is_dynamic() if patcher is not None else None
+    except Exception as exc:
+        is_dynamic = f"ERROR: {exc}"
+
+    print(f"[MiniMax H3 VAE DEBUG] ===== {label} =====")
+    print(f"[MiniMax H3 VAE DEBUG] VAE wrapper class: {type(vae).__module__}.{type(vae).__name__}")
+    print(
+        "[MiniMax H3 VAE DEBUG] first_stage_model class: "
+        f"{type(inner).__module__}.{type(inner).__name__}" if inner is not None
+        else "[MiniMax H3 VAE DEBUG] first_stage_model class: None"
+    )
+    print(
+        "[MiniMax H3 VAE DEBUG] decoder class: "
+        f"{type(decoder).__module__}.{type(decoder).__name__}" if decoder is not None
+        else "[MiniMax H3 VAE DEBUG] decoder class: None"
+    )
+    print(f"[MiniMax H3 VAE DEBUG] patch_size: {getattr(decoder, 'patch_size', None)}")
+    print(f"[MiniMax H3 VAE DEBUG] patch_size_t: {getattr(decoder, 'patch_size_t', None)}")
+    print(f"[MiniMax H3 VAE DEBUG] decoder.out_channels: {getattr(decoder, 'out_channels', None)}")
+    print(f"[MiniMax H3 VAE DEBUG] proj_out class: {type(proj_out).__module__}.{type(proj_out).__name__}" if proj_out is not None else "[MiniMax H3 VAE DEBUG] proj_out class: None")
+    print(f"[MiniMax H3 VAE DEBUG] proj_out.weight shape: {_shape_or_none(weight)}")
+    print(f"[MiniMax H3 VAE DEBUG] proj_out.bias shape: {_shape_or_none(bias)}")
+    print(f"[MiniMax H3 VAE DEBUG] proj_out.weight dtype/device: {getattr(weight, 'dtype', None)} / {getattr(weight, 'device', None)}")
+    print(f"[MiniMax H3 VAE DEBUG] proj_out.bias dtype/device: {getattr(bias, 'dtype', None)} / {getattr(bias, 'device', None)}")
+    print(f"[MiniMax H3 VAE DEBUG] pixel_mean shape: {_shape_or_none(getattr(inner, 'pixel_mean', None))}")
+    print(f"[MiniMax H3 VAE DEBUG] pixel_std shape: {_shape_or_none(getattr(inner, 'pixel_std', None))}")
+    print(f"[MiniMax H3 VAE DEBUG] patcher class: {type(patcher).__module__}.{type(patcher).__name__}" if patcher is not None else "[MiniMax H3 VAE DEBUG] patcher class: None")
+    print(f"[MiniMax H3 VAE DEBUG] patcher.is_dynamic(): {is_dynamic}")
+    print(f"[MiniMax H3 VAE DEBUG] patcher.load_device: {getattr(patcher, 'load_device', None)}")
+    print(f"[MiniMax H3 VAE DEBUG] patcher.offload_device: {getattr(patcher, 'offload_device', None)}")
+    print(f"[MiniMax H3 VAE DEBUG] vae.device: {getattr(vae, 'device', None)}")
+    print(f"[MiniMax H3 VAE DEBUG] vae.vae_dtype: {getattr(vae, 'vae_dtype', None)}")
+    print(f"[MiniMax H3 VAE DEBUG] vae.disable_offload: {getattr(vae, 'disable_offload', None)}")
+
+
+def _expand_rgb_stat(stat: torch.Tensor, packed_channels: int) -> torch.Tensor:
+    """Expand RGB normalization buffers to packed PixelShuffle channels.
+
+    The converted projection is laid out R phases, G phases, B phases, so each
+    native RGB statistic must be repeated consecutively rather than repeating
+    the whole RGB triplet.
+    """
+    if packed_channels == 3:
+        return stat
+    if any(size == packed_channels for size in stat.shape):
+        return stat
+    if packed_channels % 3:
+        raise ValueError(f"Cannot expand RGB statistics to {packed_channels} channels.")
+
+    channel_dims = [i for i, size in enumerate(stat.shape) if size == 3]
+    if not channel_dims:
+        raise ValueError(
+            f"Expected an RGB normalization buffer with a size-3 dimension, got {tuple(stat.shape)}."
+        )
+    # H3 normally stores these as 1x3x1x1x1. Prefer dimension 1 for batched
+    # buffers and otherwise use the first size-3 dimension.
+    channel_dim = 1 if stat.ndim > 1 and stat.shape[1] == 3 else channel_dims[0]
+    return stat.repeat_interleave(packed_channels // 3, dim=channel_dim)
+
+
+def _decode_h3(vae, video: torch.Tensor, output_device: torch.device, upscale: int) -> torch.Tensor:
+    """Same load + chunked-io path as VAE.decode, without the generic tiled OOM fallback."""
+    vae.throw_exception_if_invalid()
+    inner = vae.first_stage_model
+    with model_management.cuda_device_context(vae.device):
+        memory_used = vae.memory_used_decode(video.shape, vae.vae_dtype)
+        _debug_vae_load_state(vae, "BEFORE load_models_gpu")
+        print(f"[MiniMax H3 VAE DEBUG] requested decode memory: {memory_used}")
+        model_management.load_models_gpu(
+            [vae.patcher],
+            memory_required=memory_used,
+            force_full_load=vae.disable_offload,
+        )
+        _debug_vae_load_state(vae, "AFTER load_models_gpu")
+        # Dynamic loading can restore the checkpoint's original 3-channel
+        # normalization buffers, so expand them only after the load completes.
+        # This must be the final mutation before native decode/finalization.
+        if upscale > 1:
+            packed_channels = int(inner.decoder.out_channels)
+            inner.pixel_mean = _expand_rgb_stat(inner.pixel_mean, packed_channels)
+            inner.pixel_std = _expand_rgb_stat(inner.pixel_std, packed_channels)
+        pixel_samples = torch.empty(
+            inner.decode_output_shape(video.shape),
+            device=output_device,
+            dtype=vae.vae_output_dtype(),
+        )
+        samples = video.to(device=vae.device, dtype=vae.vae_dtype)
+        inner.decode(samples, output_buffer=pixel_samples)
+        vae.process_output(pixel_samples)
+        if upscale > 1:
+            # torch.pixel_shuffle expects N,C,H,W. For H3's B,C,T,H,W video,
+            # fold time into the batch, shuffle each frame, then restore time.
+            batch, channels, frames, height, width = pixel_samples.shape
+            frame_batch = pixel_samples.permute(0, 2, 1, 3, 4).reshape(
+                batch * frames, channels, height, width
+            )
+            frame_batch = F.pixel_shuffle(frame_batch, upscale_factor=upscale)
+            out_channels = channels // (upscale * upscale)
+            pixel_samples = frame_batch.reshape(
+                batch, frames, out_channels, height * upscale, width * upscale
+            ).permute(0, 2, 1, 3, 4).contiguous()
+    return pixel_samples.to(output_device).movedim(1, -1)
+
+
+def _h3_frame_count(video_t: int) -> int:
+    """Convert stock H3 video-latent T into decoded frame count."""
+    video_t = int(video_t)
+    if video_t < 2 or (video_t - 2) % 5:
+        raise ValueError(
+            f"Temporal tiling requires an H3 latent on the 17k+5 grid; got latent T={video_t}."
+        )
+    return 5 + 17 * ((video_t - 2) // 5)
+
+
+def _temporal_settings(tile_frames: int, context_frames: int) -> tuple[int, int, int, int]:
+    """Resolve UI frame requests to H3's causal groups.
+
+    The first two latent positions decode five frames. Each subsequent group of
+    five latent positions adds seventeen frames. Later tiles include two extra
+    leading latent positions plus context groups, then discard their decoded
+    prefix so only stable centre frames are retained.
+    """
+    tile_groups = max(1, int(round(max(17, int(tile_frames)) / 17.0)))
+    context_groups = max(0, int(round(max(5, int(context_frames)) - 5) / 17.0))
+    return tile_groups, context_groups, 17 * tile_groups, 5 + 17 * context_groups
+
+
+def _decode_h3_temporal_tiled(
+    vae,
+    video: torch.Tensor,
+    output_device: torch.device,
+    upscale: int,
+    tile_frames: int,
+    context_frames: int,
+    seam_warning_threshold: float,
+) -> torch.Tensor:
+    """Decode H3 in causal temporal windows and retain only stable regions."""
+    total_frames = _h3_frame_count(video.shape[2])
+    total_groups = (int(video.shape[2]) - 2) // 5
+    tile_groups, context_groups, resolved_tile, resolved_context = _temporal_settings(
+        tile_frames, context_frames
+    )
+    if total_groups <= tile_groups:
+        return _decode_h3(vae, video, output_device, upscale)
+
+    print(
+        f"[MiniMax H3 VAE Decode] Temporal tiling: {total_frames}f total, "
+        f"{resolved_tile}f new per tile, {resolved_context}f causal context."
+    )
+    pieces = []
+    completed_groups = 0
+    worst_seam = 0.0
+
+    while completed_groups < total_groups:
+        core_groups = min(tile_groups, total_groups - completed_groups)
+        if completed_groups == 0:
+            end_t = 2 + 5 * core_groups
+            decoded = _decode_h3(vae, video[:, :, :end_t], output_device, upscale)
+            pieces.append(decoded)
+        else:
+            overlap_groups = min(context_groups, completed_groups)
+            # Include the two causal base positions immediately before the
+            # overlap groups. This makes each sliced window itself 2+5k long.
+            start_t = 5 * (completed_groups - overlap_groups)
+            end_t = 2 + 5 * (completed_groups + core_groups)
+            decoded = _decode_h3(vae, video[:, :, start_t:end_t], output_device, upscale)
+            discard = 5 + 17 * overlap_groups
+            if int(decoded.shape[1]) <= discard:
+                raise RuntimeError("Temporal tile produced no stable frames after context removal.")
+
+            threshold = float(seam_warning_threshold)
+            if threshold > 0 and pieces:
+                compare = min(discard, int(pieces[-1].shape[1]))
+                if compare:
+                    previous = pieces[-1][:, -compare:].float()
+                    repeated = decoded[:, discard - compare:discard].float()
+                    difference = float(torch.mean(torch.abs(previous - repeated)).item())
+                    worst_seam = max(worst_seam, difference)
+                    if difference > threshold:
+                        print(
+                            f"[MiniMax H3 VAE Decode] WARNING: temporal seam near frame "
+                            f"{5 + 17 * completed_groups} measured {difference:.6f}, above "
+                            f"threshold {threshold:.6f}. Increase temporal_context_frames."
+                        )
+            pieces.append(decoded[:, discard:])
+        completed_groups += core_groups
+
+    images = torch.cat(pieces, dim=1)
+    if int(images.shape[1]) != total_frames:
+        raise RuntimeError(
+            f"Temporal reconstruction produced {images.shape[1]} frames; expected {total_frames}."
+        )
+    if float(seam_warning_threshold) > 0:
+        print(f"[MiniMax H3 VAE Decode] Worst temporal overlap difference: {worst_seam:.6f}.")
+    return images
+
+
+class MiniMaxH3VAEDecodeFast:
+    """Decode H3 video latents with larger spatial tiles and optional GPU output."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "samples": ("LATENT",),
+                "vae": ("VAE",),
+                "tiling": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "On: H3 spatial tiles (same algorithm as stock VAEDecode). "
+                            "Off: one full-frame ViT per temporal chunk — faster, more VRAM. "
+                            "If it OOMs, Comfy will not silently switch to a different tiler."
+                        ),
+                    },
+                ),
+                "tile_size": (
+                    "INT",
+                    {
+                        "default": 256,
+                        "min": 256,
+                        "max": 4096,
+                        "step": 16,
+                        "tooltip": (
+                            "Spatial tile size in pixels. 256 + overlap 64 matches stock VAEDecode. "
+                            "Larger tiles are faster; overlap is raised automatically to keep the "
+                            "64/256 ratio so seams do not show as a block grid."
+                        ),
+                    },
+                ),
+                "tile_overlap": (
+                    "INT",
+                    {
+                        "default": 64,
+                        "min": 16,
+                        "max": 1024,
+                        "step": 16,
+                        "tooltip": (
+                            "Minimum pixel overlap. Actual overlap is max(this, tile_size/4). "
+                            "Stock is 64 at 256px. Ignored if tiling is off."
+                        ),
+                    },
+                ),
+                "output_device": (
+                    ["cpu", "gpu"],
+                    {
+                        "default": "cpu",
+                        "tooltip": (
+                            "Where finished RGB is stored. cpu = stock Comfy. gpu = skip "
+                            "GPU→CPU copies (needs VRAM for the whole clip). Quality is the same."
+                        ),
+                    },
+                ),
+                "temporal_tiling": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "Off preserves the original full temporal decode. On decodes causal "
+                            "overlapping sections and removes their repeated context to reduce peak VRAM."
+                        ),
+                    },
+                ),
+                "temporal_tile_frames": (
+                    "INT",
+                    {
+                        "default": 85,
+                        "min": 17,
+                        "max": 3599,
+                        "step": 17,
+                        "tooltip": "Approximate number of new decoded frames per temporal tile; snapped to 17-frame H3 groups.",
+                    },
+                ),
+                "temporal_context_frames": (
+                    "INT",
+                    {
+                        "default": 39,
+                        "min": 5,
+                        "max": 702,
+                        "step": 17,
+                        "tooltip": "Leading causal context decoded again and discarded at every temporal boundary.",
+                    },
+                ),
+                "seam_warning_threshold": (
+                    "FLOAT",
+                    {
+                        "default": 0.02,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.001,
+                        "tooltip": "Warn when repeated overlap differs by more than this mean absolute value; 0 disables checking.",
+                    },
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("images",)
+    FUNCTION = "decode"
+    CATEGORY = "latent/minimax_h3"
+    DESCRIPTION = (
+        "H3 video VAE decode with spatial-tile and output-device controls. "
+        "Default 256px / 64 overlap matches stock VAEDecode quality. Larger tile_size "
+        "keeps the same overlap ratio. Decodes through H3's own tiled path only — no "
+        "generic 3D-tiler fallback. Optional causal temporal tiling supports long latents."
+    )
+
+    def decode(
+        self,
+        samples,
+        vae,
+        tiling=True,
+        tile_size=256,
+        tile_overlap=64,
+        output_device="cpu",
+        temporal_tiling=False,
+        temporal_tile_frames=85,
+        temporal_context_frames=39,
+        seam_warning_threshold=0.02,
+    ):
+        inner = _h3_video_vae(vae)
+        video = _video_latent(samples)
+        _debug_vae_load_state(vae, "NODE ENTRY")
+        packed_channels, upscale = _decoder_channel_packing(inner)
+        print(f"[MiniMax H3 VAE DEBUG] inferred packed_channels: {packed_channels}")
+        print(f"[MiniMax H3 VAE DEBUG] inferred PixelShuffle upscale: {upscale}x")
+        tile_size = _snap_multiple(tile_size, _H3_TILE_MULTIPLE, _STOCK_TILE)
+        overlap = _effective_overlap(tile_size, tile_overlap)
+
+        if output_device == "gpu":
+            out_dev = model_management.get_torch_device()
+        else:
+            out_dev = model_management.intermediate_device()
+
+        saved = {name: getattr(inner, name) for name in _H3_VAE_ATTRS}
+        saved_out_channels = inner.decoder.out_channels
+        saved_pixel_mean = inner.pixel_mean
+        saved_pixel_std = inner.pixel_std
+        try:
+            # Like the creator's WAN 2x VAE, the converted MiniMax projection emits
+            # packed RGB subpixel channels at its native spatial ratio. PixelShuffle
+            # turns those channels into the final 2x image after H3's own tiled decode.
+            inner.decoder.out_channels = packed_channels
+            inner.tiling = bool(tiling)
+            inner.tile_size = tile_size
+            inner.tile_overlap_min = overlap
+            if temporal_tiling:
+                images = _decode_h3_temporal_tiled(
+                    vae,
+                    video,
+                    out_dev,
+                    upscale,
+                    temporal_tile_frames,
+                    temporal_context_frames,
+                    seam_warning_threshold,
+                )
+            else:
+                images = _decode_h3(vae, video, out_dev, upscale)
+        finally:
+            inner.decoder.out_channels = saved_out_channels
+            inner.pixel_mean = saved_pixel_mean
+            inner.pixel_std = saved_pixel_std
+            for name, value in saved.items():
+                setattr(inner, name, value)
+
+        if len(images.shape) == 5:
+            images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
+        return (images,)

@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "platform": "linux",
+  "architecture": "x64",
+  "backend": "sycl",
+  "backend_description": "本机 llama.cpp SYCL 构建（Intel Arc Pro B70）",
+  "llama_cpp_tag": "local",
+  "llama_cpp_commit": "c479922",
+  "executable": "runtime/linux-x64/local/b10436/llama-server",
+  "library_dirs": [
+    "runtime/linux-x64/local/b10436"
+  ],
+  "runtime_options": {
+    "n_gpu_layers": "auto",
+    "fit": true,
+    "fit_target_mib": 1536,
+    "flash_attention": "auto"
+  },
+  "detected_gpus": [
+    "Intel(R) Arc(TM) Pro B70 Graphics"
+  ],
+  "version_output": "version: 0.6.0-dev (build 1, commit c479922)\nbuilt with IntelLLVM 2026.1.1 for Linux x86_64",
+  "devices_output": "Available devices:\n  SYCL0: Intel(R) Arc(TM) Pro B70 Graphics (32656 MiB, 31652 MiB free)",
+  "installed_at": "2026-10-14T00:00:00+00:00",
+  "source": "local build"
+}

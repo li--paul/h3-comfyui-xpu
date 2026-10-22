@@ -19,3 +19,8 @@ output/*.mp4
 
 # test renders (e.g. the diffusers Usage snippet)
 output/*.png
+
+# MiniMax-H3 test artifacts (regenerate with ./h3-test.sh)
+h3_output/
+
+

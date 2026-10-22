@@ -152,11 +152,27 @@ pipe("a photo of a cat on the moon").images[0].save("out.png")
 .venv/bin/python vendor/ComfyUI/main.py --listen 0.0.0.0 --port 8188
 ```
 
+### MiniMax-H3 video generation
+
+`h3-test.sh` runs one H3 shot on a single card and writes to `h3_output/`:
+
+```bash
+./h3-test.sh                        # GPU 0, reference prompt, manifest defaults
+./h3-test.sh 4                      # bind to GPU 4
+./h3-test.sh 0 "a lighthouse in a storm"   # custom prompt, single segment
+```
+
+Needs the H3 weights at `~/work/models/ComfyUI-MiniMax-H3` (`H3_MODELS=` to
+override); everything else — custom nodes, workflow, reference images — is
+vendored in `h3_input/`. Expect ~11 min on one Arc Pro B60 (8 steps at ~70 s/step).
+
 ## Layout
 
 - `.venv/` — virtual environment (uv)
 - `vendor/vllm/` — vllm `v0.32.0` source checkout (path source)
 - `vendor/vllm-omni/` — vllm-omni `v0.32.0rc1` source checkout (path source)
 - `vendor/ComfyUI/` — ComfyUI source checkout (run in place)
+- `h3_input/` — MiniMax-H3 custom nodes, API workflow, and reference assets
+- `h3_output/` — H3 test renders (gitignored)
 - `pyproject.toml` — declarative environment + `uv.lock`
 - `setup.sh` — one-command setup (oneAPI env + `uv sync`)

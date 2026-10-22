@@ -132,56 +132,41 @@ Don't "simplify" these away — each mirrors the official vLLM-Omni XPU Docker b
 
 ## MiniMax-H3 (神笔马良) video generation
 
-H3 works, but **not** through this repo's ComfyUI yet — see the follow-up below.
+One command: `./h3-test.sh [GPU] ["prompt"] [--keep-server]`. It runs this repo's
+ComfyUI (`vendor/ComfyUI`) on one card and writes to `h3_output/`.
 
-The reference deployment lives on disk at `~/work/simon/神笔马良_demo` and is
-self-contained: ComfyUI 0.39.0, its own `.venv` (torch 2.14.1+xpu), its own 53 GB
-model copy, and two custom nodes pinned to specific commits
-(`ComfyUI-JZL-MiniMax-H3` 82acd16, `ComfyUI-MiniMaxH3_LatentUpscaler` 2e568df).
-Run one card like this:
-
-```bash
-cd ~/work/simon/神笔马良_demo
-GPUS=0 PORT=8190 ./start.sh        # ZE_AFFINITY_MASK=0, --async-offload 2 --reserve-vram 2
-```
+- `h3_input/` — everything the test needs, vendored (no external package required):
+  - `custom_nodes/` — `ComfyUI-JZL-MiniMax-H3` (82acd16) and
+    `ComfyUI-MiniMaxH3_LatentUpscaler` (2e568df); `COMMITS` records the pins.
+    The script symlinks them into `vendor/ComfyUI/custom_nodes/`.
+  - `prompts/jzl_shot1_api.json` — the reference API workflow
+  - `assets/` — reference images for the scene slots
+  - `jzl_manager.json` — seed for the node's persisted settings
+- Weights come from `~/work/models/ComfyUI-MiniMax-H3` via a generated
+  `vendor/ComfyUI/extra_model_paths.yaml` (`H3_MODELS=` to override).
+- The script picks `minimax_h3_video_vae_bf16` or `_fp16`, whichever exists, and
+  rewrites the workflow's `VAELoader` + `manager_settings` to match.
+- Env overrides: `PORT`, `TIMEOUT`, `H3_INPUT`, `H3_MODELS`, `STEPS`, `DURATION`, `SEED`.
 
 **The whole H3 graph is built inside one custom node.** The API workflow is only
 6 nodes: four loaders plus `JZL_MiniMaxAssetManager`, which internally builds
-segmentation → ref2va encode → sample → video+audio VAE decode. So our ComfyUI
-0.42's native `MiniMaxH3*` nodes cannot run the reference workflow — they would
-need a hand-built graph.
+segmentation → ref2va encode → sample → video+audio VAE decode. So ComfyUI's
+native `MiniMaxH3*` nodes cannot run this workflow — they would need a hand-built
+graph.
 
-Verified baseline (2026-10-22, single Arc B60, `prompt_id` 9dbbaf25):
-8 steps / 70.1 s per step / **9 min 21 s sampling, ~11 min wall**, 124 frames,
-1376×768, 5.17 s, AAC 32 kHz stereo present, VRAM peaked ~21.4 GB with ~24.2 GB
-free at every stage boundary, no `DEVICE_LOST` and no xe/GuC faults in `dmesg`.
-Defaults that matter: `res_multistep` / `beta`, 8 steps, CFG 1.0, seed 1001 fixed,
-bf16 VAE, 1.0 MP 16:9.
+Verified (2026-10-22, single Arc B60, seed 1001): 8 steps at **70.1 s/step**,
+**9 min 21 s sampling / ~11 min wall**, 124 frames, 1376×768, 5.17 s, AAC 32 kHz
+stereo present. Defaults that matter: `res_multistep` / `beta`, 8 steps, CFG 1.0,
+seed 1001 fixed, bf16 VAE compute, 1.0 MP 16:9. Output from ComfyUI 0.42 + torch
+2.14.0 is **bit-identical** to the reference package's 0.39 + torch 2.14.1 run
+(mean abs pixel diff 0.00 across all 124 frames), so the JZL nodes are forward
+compatible with 0.42 and the diffusers 0.40 / accelerate 1.12 pins are not a
+problem for H3.
 
-The 2026-10-20 output dirs have zero mp4s and logs that stop mid-sampling with no
-error — those were load-concurrency casualties, not a package bug (the manifest
-describes `UR_RESULT_ERROR_DEVICE_LOST` under simultaneous 20 GB loads). One card
-at a time does not reproduce it.
-
-### Follow-up: port H3 to this repo's ComfyUI 0.42.0
-
-Not done yet. In order:
-
-1. Install `ComfyUI-JZL-MiniMax-H3` + `ComfyUI-MiniMaxH3_LatentUpscaler` into
-   `vendor/ComfyUI/custom_nodes/` (currently only `ComfyUI-H3-Motion-Context`).
-   The nodes target 0.39 and use the `io.ComfyNode` / `define_schema` API — check
-   they still register on 0.42 before anything else.
-2. Point `extra_model_paths.yaml` at `~/work/models/ComfyUI-MiniMax-H3`
-   (`diffusion_models`, `text_encoders`, `clip`, `vae`, `loras`).
-3. **VAE filename mismatch:** the workflow hardcodes
-   `minimax_h3_video_vae_bf16.safetensors`, which only the demo's own 53 GB copy
-   has. `~/work/models` ships `..._fp16.safetensors` instead — retarget the
-   workflow or run the demo's bundled `tools/convert_vae_bf16.py`.
-4. Env drift to expect: manifest runs diffusers 0.41.0 / accelerate 1.15.0 /
-   torch 2.14.1, ours is pinned to 0.40.0 / 1.12.0 / 2.14.0 by vllm-omni. If the
-   nodes need diffusers 0.41 APIs, use a dedicated ComfyUI venv instead of `.venv`.
-5. Re-run the same seed (1001) and compare against the baseline above; per-step
-   time is the A/B metric.
+`dmesg` shows no `DEVICE_LOST` and no xe/GuC faults for a single card. The
+zero-mp4 output dirs from 2026-10-20 were load-concurrency casualties (the
+delivery manifest describes `UR_RESULT_ERROR_DEVICE_LOST` when ~20 GB lands on
+many cards at once), not a package bug.
 
 ## Other verified XPU facts
 

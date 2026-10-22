@@ -1,0 +1,718 @@
+{
+  "JZL_MiniMaxH3ReferenceToVideo": {
+    "display_name": "JZL - 🎬 MiniMax H3 Reference Encode"
+  },
+  "JZL_MiniMaxH3ReferenceToVideo2": {
+    "display_name": "JZL - 🎬 MiniMax H3 Reference Encode 2"
+  },
+  "JZL_MiniMaxH3CondSync": {
+    "display_name": "JZL - 🌊 Hailuo H3 Cond Sync",
+    "outputs": {
+      "0": {
+        "name": "Positive"
+      },
+      "1": {
+        "name": "Latent"
+      }
+    }
+  },
+  "JZL_MiniMaxH3ImageToVideoDual": {
+    "display_name": "JZL - 🎬 MiniMax H3 Dual Encode",
+    "outputs": {
+      "0": {
+        "name": "Positive"
+      },
+      "1": {
+        "name": "Latent"
+      },
+      "2": {
+        "name": "Positive 2"
+      }
+    }
+  },
+  "JZL_HailuoH3VideoParams": {
+    "display_name": "JZL - 🌊 Hailuo H3 Video Params",
+    "outputs": {
+      "0": {
+        "name": "Width"
+      },
+      "1": {
+        "name": "Height"
+      },
+      "2": {
+        "name": "Frames"
+      },
+      "3": {
+        "name": "Ref Scale"
+      }
+    }
+  },
+  "JZL_HailuoH3VideoParamsPro": {
+    "display_name": "JZL - 🌊 Hailuo H3 Video Params Pro",
+    "outputs": {
+      "0": {
+        "name": "Width"
+      },
+      "1": {
+        "name": "Height"
+      },
+      "2": {
+        "name": "Frames"
+      },
+      "3": {
+        "name": "Ref Scale"
+      },
+      "4": {
+        "name": "Upscale Scale"
+      }
+    }
+  },
+  "JZL_ListDispatcher": {
+    "display_name": "JZL - 📋 List Dispatcher",
+    "outputs": {
+      "0": {
+        "name": "Segment 1"
+      },
+      "1": {
+        "name": "Segment 2"
+      },
+      "2": {
+        "name": "Segment 3"
+      },
+      "3": {
+        "name": "Segment 4"
+      },
+      "4": {
+        "name": "Segment 5"
+      },
+      "5": {
+        "name": "Segment 6"
+      },
+      "6": {
+        "name": "Segment 7"
+      },
+      "7": {
+        "name": "Segment 8"
+      },
+      "8": {
+        "name": "Segment 9"
+      },
+      "9": {
+        "name": "Segment 10"
+      },
+      "10": {
+        "name": "Segment 11"
+      },
+      "11": {
+        "name": "Segment 12"
+      },
+      "12": {
+        "name": "Segment 13"
+      },
+      "13": {
+        "name": "Segment 14"
+      },
+      "14": {
+        "name": "Segment 15"
+      },
+      "15": {
+        "name": "Segment 16"
+      },
+      "16": {
+        "name": "Segment 17"
+      },
+      "17": {
+        "name": "Segment 18"
+      },
+      "18": {
+        "name": "Segment 19"
+      },
+      "19": {
+        "name": "Segment 20"
+      },
+      "20": {
+        "name": "Segment 21"
+      },
+      "21": {
+        "name": "Segment 22"
+      },
+      "22": {
+        "name": "Segment 23"
+      },
+      "23": {
+        "name": "Segment 24"
+      },
+      "24": {
+        "name": "Segment 25"
+      },
+      "25": {
+        "name": "Segment 26"
+      },
+      "26": {
+        "name": "Segment 27"
+      },
+      "27": {
+        "name": "Segment 28"
+      },
+      "28": {
+        "name": "Segment 29"
+      },
+      "29": {
+        "name": "Segment 30"
+      },
+      "30": {
+        "name": "Segment 31"
+      },
+      "31": {
+        "name": "Segment 32"
+      },
+      "32": {
+        "name": "Segment 33"
+      },
+      "33": {
+        "name": "Segment 34"
+      },
+      "34": {
+        "name": "Segment 35"
+      },
+      "35": {
+        "name": "Segment 36"
+      },
+      "36": {
+        "name": "Segment 37"
+      },
+      "37": {
+        "name": "Segment 38"
+      },
+      "38": {
+        "name": "Segment 39"
+      },
+      "39": {
+        "name": "Segment 40"
+      },
+      "40": {
+        "name": "Segment 41"
+      },
+      "41": {
+        "name": "Segment 42"
+      },
+      "42": {
+        "name": "Segment 43"
+      },
+      "43": {
+        "name": "Segment 44"
+      },
+      "44": {
+        "name": "Segment 45"
+      },
+      "45": {
+        "name": "Segment 46"
+      },
+      "46": {
+        "name": "Segment 47"
+      },
+      "47": {
+        "name": "Segment 48"
+      },
+      "48": {
+        "name": "Segment 49"
+      },
+      "49": {
+        "name": "Segment 50"
+      },
+      "50": {
+        "name": "Segment 51"
+      },
+      "51": {
+        "name": "Segment 52"
+      },
+      "52": {
+        "name": "Segment 53"
+      },
+      "53": {
+        "name": "Segment 54"
+      },
+      "54": {
+        "name": "Segment 55"
+      },
+      "55": {
+        "name": "Segment 56"
+      },
+      "56": {
+        "name": "Segment 57"
+      },
+      "57": {
+        "name": "Segment 58"
+      },
+      "58": {
+        "name": "Segment 59"
+      },
+      "59": {
+        "name": "Segment 60"
+      },
+      "60": {
+        "name": "Segment 61"
+      },
+      "61": {
+        "name": "Segment 62"
+      },
+      "62": {
+        "name": "Segment 63"
+      },
+      "63": {
+        "name": "Segment 64"
+      },
+      "64": {
+        "name": "Segment 65"
+      },
+      "65": {
+        "name": "Segment 66"
+      },
+      "66": {
+        "name": "Segment 67"
+      },
+      "67": {
+        "name": "Segment 68"
+      },
+      "68": {
+        "name": "Segment 69"
+      },
+      "69": {
+        "name": "Segment 70"
+      },
+      "70": {
+        "name": "Segment 71"
+      },
+      "71": {
+        "name": "Segment 72"
+      },
+      "72": {
+        "name": "Segment 73"
+      },
+      "73": {
+        "name": "Segment 74"
+      },
+      "74": {
+        "name": "Segment 75"
+      },
+      "75": {
+        "name": "Segment 76"
+      },
+      "76": {
+        "name": "Segment 77"
+      },
+      "77": {
+        "name": "Segment 78"
+      },
+      "78": {
+        "name": "Segment 79"
+      },
+      "79": {
+        "name": "Segment 80"
+      },
+      "80": {
+        "name": "Segment 81"
+      },
+      "81": {
+        "name": "Segment 82"
+      },
+      "82": {
+        "name": "Segment 83"
+      },
+      "83": {
+        "name": "Segment 84"
+      },
+      "84": {
+        "name": "Segment 85"
+      },
+      "85": {
+        "name": "Segment 86"
+      },
+      "86": {
+        "name": "Segment 87"
+      },
+      "87": {
+        "name": "Segment 88"
+      },
+      "88": {
+        "name": "Segment 89"
+      },
+      "89": {
+        "name": "Segment 90"
+      },
+      "90": {
+        "name": "Segment 91"
+      },
+      "91": {
+        "name": "Segment 92"
+      },
+      "92": {
+        "name": "Segment 93"
+      },
+      "93": {
+        "name": "Segment 94"
+      },
+      "94": {
+        "name": "Segment 95"
+      },
+      "95": {
+        "name": "Segment 96"
+      },
+      "96": {
+        "name": "Segment 97"
+      },
+      "97": {
+        "name": "Segment 98"
+      },
+      "98": {
+        "name": "Segment 99"
+      }
+    }
+  },
+  "JZL_MiniMax_ShotFormatter": {
+    "display_name": "JZL - 📋 Shot Formatter",
+    "outputs": {
+      "0": {
+        "name": "H3 Prompt"
+      },
+      "1": {
+        "name": "Scene Instruction"
+      },
+      "2": {
+        "name": "Video Dispatch"
+      },
+      "3": {
+        "name": "Audio Dispatch"
+      }
+    }
+  },
+  "JZL_MiniMax_SceneDispatcher": {
+    "display_name": "JZL - 🎯 Scene Dispatcher"
+  },
+  "JZL_MiniMax_VideoDispatcher": {
+    "display_name": "JZL - 🎬 Video Dispatcher"
+  },
+  "JZL_MiniMax_AudioDispatcher": {
+    "display_name": "JZL - 🎧 Audio Dispatcher"
+  },
+  "JZL_MiniMax_SceneDispatcher2": {
+    "display_name": "JZL - 🎯 Scene Dispatcher 2"
+  },
+  "JZL_MiniMax_VideoDispatcher2": {
+    "display_name": "JZL - 🎬 Video Dispatcher 2"
+  },
+  "JZL_MiniMax_AudioDispatcher2": {
+    "display_name": "JZL - 🎧 Audio Dispatcher 2"
+  },
+  "JZL_LlamaModelLoaderPro": {
+    "display_name": "JZL - 🚀 Model Loader Pro"
+  },
+  "JZL_MiniMax_ScriptProcessor": {
+    "display_name": "JZL - 🎬 Script & Shot Processor",
+    "outputs": {
+      "0": {
+        "name": "Script Output"
+      }
+    }
+  },
+  "JZL_MiniMaxPreset": {
+    "display_name": "JZL - ✨ MiniMax fl2va Prompt Preset"
+  },
+  "JZL_MiniMaxRef2vaPreset": {
+    "display_name": "JZL - ✨ MiniMax ref2va Prompt Preset"
+  },
+  "JZL_MiniMaxH3Preference": {
+    "display_name": "JZL - 🎯 MiniMax H3 Preferences",
+    "outputs": {
+      "0": {
+        "name": "Preference Prompt"
+      }
+    }
+  },
+  "JZL_MiniMaxAPISettings": {
+    "display_name": "JZL - 🌐 LLM-API Settings"
+  },
+  "JZL_MiniMaxMusicCaption": {
+    "display_name": "JZL - 🎵 MiniMax Music3 Prompt Preset"
+  },
+  "JZL_MiniMaxMusicCaptionDuet": {
+    "display_name": "JZL - 🎵 MiniMax Music3 Prompt Preset (Duet)"
+  },
+  "JZL_MiniMaxMusicLyricsEditor": {
+    "display_name": "JZL - 🎵 MiniMax Music3 Lyrics Editor"
+  },
+  "JZL_MiniMaxH3RefBusOut": {
+    "display_name": "JZL - 🔗 MiniMax H3 Ref Bus (Pack)",
+    "outputs": {
+      "0": {
+        "name": "Ref Bus"
+      }
+    }
+  },
+  "JZL_MiniMaxH3RefBusIn": {
+    "display_name": "JZL - 🔗 MiniMax H3 Ref Bus (Unpack)",
+    "outputs": {
+      "0": {
+        "name": "Character A"
+      },
+      "1": {
+        "name": "Scene A"
+      },
+      "2": {
+        "name": "Prop A"
+      },
+      "3": {
+        "name": "Audio A"
+      },
+      "4": {
+        "name": "Video A"
+      },
+      "5": {
+        "name": "Video (Audio) A"
+      },
+      "6": {
+        "name": "Character B"
+      },
+      "7": {
+        "name": "Scene B"
+      },
+      "8": {
+        "name": "Prop B"
+      },
+      "9": {
+        "name": "Audio B"
+      },
+      "10": {
+        "name": "Video B"
+      },
+      "11": {
+        "name": "Video (Audio) B"
+      },
+      "12": {
+        "name": "Character C"
+      },
+      "13": {
+        "name": "Scene C"
+      },
+      "14": {
+        "name": "Prop C"
+      },
+      "15": {
+        "name": "Audio C"
+      },
+      "16": {
+        "name": "Video C"
+      },
+      "17": {
+        "name": "Video (Audio) C"
+      },
+      "18": {
+        "name": "Character D"
+      },
+      "19": {
+        "name": "Scene D"
+      },
+      "20": {
+        "name": "Prop D"
+      },
+      "21": {
+        "name": "Audio D"
+      },
+      "22": {
+        "name": "Video D"
+      },
+      "23": {
+        "name": "Video (Audio) D"
+      },
+      "24": {
+        "name": "Character E"
+      },
+      "25": {
+        "name": "Scene E"
+      },
+      "26": {
+        "name": "Prop E"
+      },
+      "27": {
+        "name": "Audio E"
+      },
+      "28": {
+        "name": "Video E"
+      },
+      "29": {
+        "name": "Video (Audio) E"
+      },
+      "30": {
+        "name": "Character F"
+      },
+      "31": {
+        "name": "Scene F"
+      },
+      "32": {
+        "name": "Prop F"
+      },
+      "33": {
+        "name": "Audio F"
+      },
+      "34": {
+        "name": "Video F"
+      },
+      "35": {
+        "name": "Video (Audio) F"
+      },
+      "36": {
+        "name": "Character G"
+      },
+      "37": {
+        "name": "Scene G"
+      },
+      "38": {
+        "name": "Prop G"
+      },
+      "39": {
+        "name": "Audio G"
+      },
+      "40": {
+        "name": "Video G"
+      },
+      "41": {
+        "name": "Video (Audio) G"
+      },
+      "42": {
+        "name": "Character H"
+      },
+      "43": {
+        "name": "Scene H"
+      },
+      "44": {
+        "name": "Prop H"
+      },
+      "45": {
+        "name": "Audio H"
+      },
+      "46": {
+        "name": "Video H"
+      },
+      "47": {
+        "name": "Video (Audio) H"
+      }
+    }
+  },
+  "JZL_MiniMaxPromptEnhancer": {
+    "display_name": "JZL - ✨ Prompt Enhancer",
+    "outputs": {
+      "0": {
+        "name": "Enhanced Script"
+      }
+    }
+  },
+  "JZL_MiniMaxAssetManager": {
+    "display_name": "JZL - 🤖 MiniMax-H3 Short Drama Director Pro",
+    "inputs": {
+      "run_mode": { "name": "Run Mode" },
+      "aspect_ratio": { "name": "Aspect Ratio" },
+      "megapixels": { "name": "Megapixels (MP)" },
+      "display_info": { "name": "Resolution / Total Frames" },
+      "duration": { "name": "Per-Segment Duration" },
+      "scale_factor": { "name": "Reference Value Scale" },
+      "upscale_scale": { "name": "2nd-Pass Latent Scale" },
+      "video_count": { "name": "Video Count" },
+      "save_mode": { "name": "Save Mode" },
+      "auto_save": { "name": "Auto Save Segments" },
+      "auto_save_path": { "name": "Auto Save Path" },
+      "auto_merge": { "name": "Auto Merge Segments" },
+      "auto_merge_path": { "name": "Merge Output Path" },
+      "auto_merge_delete": { "name": "Delete Segments After Merge" },
+      "story_style": { "name": "Story Style" },
+      "story_name": { "name": "Story Name" },
+      "prompt_lang": { "name": "Output Language" },
+      "model": { "name": "Model" },
+      "clip": { "name": "CLIP" },
+      "vae": { "name": "VAE" },
+      "audio_vae": { "name": "Audio VAE" }
+    }
+  },
+  "JZL_MiniMaxAssetManagerMax": {
+    "display_name": "JZL - 🤖 MiniMax-H3 Short Drama Director Max",
+    "inputs": {
+      "run_mode": { "name": "Run Mode" },
+      "aspect_ratio": { "name": "Aspect Ratio" },
+      "megapixels": { "name": "Megapixels (MP)" },
+      "duration": { "name": "Duration per Video" },
+      "scale_factor": { "name": "Reference Scale" },
+      "upscale_scale": { "name": "Upscale Scale" },
+      "video_count": { "name": "Video Count" },
+      "story_style": { "name": "Story Style" },
+      "story_name": { "name": "Story Name" },
+      "model": { "name": "Model" },
+      "clip": { "name": "CLIP" },
+      "vae": { "name": "VAE" },
+      "audio_vae": { "name": "Audio VAE" }
+    },
+    "outputs": {
+      "0": { "name": "Processed Script" }
+    }
+  },
+  "JZL_MiniMaxAssetManagerInfinite": {
+    "display_name": "JZL - 🤖 MiniMax-H3 Infinite Length",
+    "inputs": {
+      "run_mode": { "name": "Run Mode" },
+      "display_info": { "name": "Generation Info" },
+      "aspect_ratio": { "name": "Aspect Ratio" },
+      "megapixels": { "name": "Megapixels (MP)" },
+      "duration": { "name": "Duration per Video" },
+      "scale_factor": { "name": "Reference Scale" },
+      "upscale_scale": { "name": "Upscale Scale" },
+      "video_count": { "name": "Segment Count" },
+      "story_style": { "name": "Story Style" },
+      "story_name": { "name": "Story Name" },
+      "external_prompt": { "name": "Prompt (wire input)" },
+      "internal_prompt": { "name": "Prompt (in-node)" },
+      "manager_settings": { "name": "Node Config" },
+      "model": { "name": "Model" },
+      "clip": { "name": "CLIP" },
+      "vae": { "name": "VAE" },
+      "audio_vae": { "name": "Audio VAE" }
+    },
+    "outputs": {
+      "0": { "name": "Processed Script" }
+    }
+  },
+  "JZL_MiniMaxVideoViewer": {
+    "display_name": "JZL - 🎬 Generated Video Viewer",
+    "inputs": {
+      "story_name": { "name": "Current Story" }
+    },
+    "outputs": {
+      "0": { "name": "Video Files" }
+    }
+  },
+  "JZL_MiniMaxAssetManagerMini": {
+    "display_name": "JZL - 🤖 MiniMax-H3 Short Drama Director Mini",
+    "inputs": {
+      "run_mode": { "name": "Run Mode" },
+      "aspect_ratio": { "name": "Aspect Ratio" },
+      "megapixels": { "name": "Megapixels (MP)" },
+      "display_info": { "name": "Resolution / Total Frames" },
+      "duration": { "name": "Per-Segment Duration" },
+      "scale_factor": { "name": "Reference Value Scale" },
+      "video_count": { "name": "Video Count" },
+      "upscale_scale": { "name": "2nd-Pass Latent Scale" },
+      "story_style": { "name": "Story Style" },
+      "story_name": { "name": "Story Name" },
+      "model": { "name": "Model" },
+      "clip": { "name": "CLIP" },
+      "vae": { "name": "VAE" },
+      "audio_vae": { "name": "Audio VAE" }
+    },
+    "outputs": {
+      "0": { "name": "Model" },
+      "1": { "name": "VAE" },
+      "2": { "name": "Audio VAE" },
+      "3": { "name": "Latent Scale" },
+      "4": { "name": "Positive" },
+      "5": { "name": "Latent" },
+      "6": { "name": "Decomposed Script" }
+    }
+  }
+}
