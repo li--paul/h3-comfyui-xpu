@@ -168,6 +168,43 @@ zero-mp4 output dirs from 2026-10-20 were load-concurrency casualties (the
 delivery manifest describes `UR_RESULT_ERROR_DEVICE_LOST` when ~20 GB lands on
 many cards at once), not a package bug.
 
+## MiniMax-H3 on vLLM-Omni — starts but output is broken (2026-10-22)
+
+**Do not treat vLLM-Omni as a working H3 path on XPU.** It starts, serves, and returns a
+valid mp4 with the right shape and audio, but the video content is degenerate (dark, blurred,
+zoomed into a fragment of the reference image). Same weights, same prompt, same reference
+image, same seed produce a correct clip in ComfyUI, so this is not a prompt or weight problem.
+
+Measured on 2× Arc Pro B60, Ref2VA 135 GiB partition at `~/work/models/MiniMax-H3/Ref2VA`,
+TP2 + DLO (12 resident layers) + tiled VAE, turbo LoRA
+`minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors`, 9 steps, seed 1001, 1376×768:
+
+| variant | E2E | peak/rank | frame mean (std) |
+|---|---:|---:|---|
+| ComfyUI INT8 ConvRot | 653 s | ~21 GiB | **109.4 (69.6)** |
+| vLLM-Omni FP8 online, FLASH_ATTN | 360 s | 14.8 GiB | 40.8 (28.7) |
+| vLLM-Omni BF16, FLASH_ATTN | 371 s | 18.7 GiB | 43.0 (32.9) |
+| vLLM-Omni BF16, TORCH_SDPA | 450 s | 18.4 GiB | 43.4 (32.6) |
+
+Things this rules out, so don't re-test them:
+
+- **Not FP8.** BF16 is equally degraded, so quantization precision is not the cause.
+- **Not the attention backend.** FLASH_ATTN and TORCH_SDPA give the same result.
+- **Not the turbo LoRA or step schedule.** The 2-step smoke is equally blurred.
+- **Not VRAM.** Peak 18.7 GiB of 23.9 GiB, no `DEVICE_LOST`, no xe/GuC faults.
+- **Not startup.** Engine comes up in ~120 s and every request returns HTTP 200.
+
+Leading suspect is the **XPU diffusion execution path** (layerwise offload staging or
+tensor-parallel sharding of the DiT producing wrong activations), since `platforms/xpu`
+provides its own diffusion attention backend and none of the H3 recipes cover XPU.
+Next thing to try: `--num-gpus 1` without DLO (needs ~62 GiB, so it will OOM on one
+24 GiB card — try FP8 single-GPU instead), or a T2VA request on the FL2VA partition to see
+whether reference conditioning specifically is what breaks.
+
+Note the recipe constraint too: the `_comfyui_` LoRA export is refused by name, and the
+Diffusers artifact mandates `num_inference_steps=9` with `flow_shift=6` — the server
+rejects mismatches.
+
 ## Other verified XPU facts
 
 - `xpu-smi`/Sysman can't read telemetry on these cards — `gpu_monitor.py` reads `xe` sysfs instead.

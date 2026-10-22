@@ -24,4 +24,10 @@ output/*.png
 # themselves are tracked as sample outputs
 h3_output/server.log
 
+# H3 turbo LoRA (1.3 GB, fetched from lightx2v/Minimax-h3-Turbo)
+h3_input/loras/
+
+# vLLM-Omni H3 experiment: renders and server logs
+vllm-omni-output/
+
 
