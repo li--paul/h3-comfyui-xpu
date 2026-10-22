@@ -9,8 +9,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 # Source checkouts used by the vllm / vllm-omni path sources.
-VLLM_VER="v0.26.0"
-VLLM_OMNI_VER="v0.26.0"
+# vLLM 0.31+ is the first line that builds against torch 2.14; vllm-omni
+# 0.32.0rc1 is the matching release (there is no stable omni on vLLM 0.32 yet).
+VLLM_VER="v0.32.0"
+VLLM_OMNI_VER="v0.32.0rc1"
 [ -d "$ROOT/vendor/vllm" ] || git clone --depth 1 --branch "$VLLM_VER" https://github.com/vllm-project/vllm.git "$ROOT/vendor/vllm"
 [ -d "$ROOT/vendor/vllm-omni" ] || git clone --depth 1 --branch "$VLLM_OMNI_VER" https://github.com/vllm-project/vllm-omni.git "$ROOT/vendor/vllm-omni"
 [ -d "$ROOT/vendor/ComfyUI" ] || git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git "$ROOT/vendor/ComfyUI"
@@ -49,7 +51,8 @@ uv pip install --python "$LTX_VENV/bin/python" \
     "torch==2.12.0" "torchaudio==2.11.0" "torchvision==0.27.0" \
     "transformers>=5.8,<5.15" \
     "einops" "numpy" "safetensors" "accelerate" "scipy>=1.14" \
-    "av" "tqdm" "pillow" "openimageio" "cloudpickle>=3.1"
+    "av" "tqdm" "pillow" "openimageio" "cloudpickle>=3.1" \
+    "colour-science"
 # 2) ltx packages with --no-deps so their cu132 torch source cannot override.
 uv pip install --python "$LTX_VENV/bin/python" \
     --index-strategy unsafe-best-match \
@@ -68,8 +71,8 @@ DEVICES="$LTX_ROOT/packages/ltx-core/src/ltx_core/devices.py"
 if ! grep -q 'torch.xpu.is_available()' "$DEVICES"; then
     perl -0pi -e 's/    if is_mps_available\(\):\n        return torch\.device\("mps"\)\n    return torch\.device\("cpu"\)/    if is_mps_available():\n        return torch.device("mps")\n    if torch.xpu.is_available():\n        return torch.device("xpu")\n    return torch.device("cpu")/' "$DEVICES"
 fi
-BLOCKS="$LTX_ROOT/packages/ltx-pipelines/src/ltx_pipelines/utils/blocks.py"
-if ! grep -q 'self._device.type in ("mps", "xpu")' "$BLOCKS"; then
+BLOCKS="$LTX_ROOT/packages/ltx-pipelines/src/ltx_pipelines/utils/blocks/audio_decoder.py"
+if [ -f "$BLOCKS" ] && ! grep -q 'self._device.type in ("mps", "xpu")' "$BLOCKS"; then
     perl -0pi -e 's/vocoder_dtype = torch\.float32 if self\._device\.type == "mps" else self\._dtype/vocoder_dtype = (torch.float32 if self._device.type in ("mps", "xpu") else self._dtype)/' "$BLOCKS"
 fi
 ATTENTION="$LTX_ROOT/packages/ltx-core/src/ltx_core/model/transformer/attention.py"

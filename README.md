@@ -2,9 +2,9 @@
 
 Intel XPU AI stack in a single `uv` virtual environment (CPython 3.12):
 
-- **PyTorch** `2.12.0+xpu` (from `https://download.pytorch.org/whl/xpu`)
-- **vLLM-Omni** `0.26.0+xpu` (built from source, `VLLM_TARGET_DEVICE=xpu`)
-- **Diffusers** `0.38.0`
+- **PyTorch** `2.14.0+xpu` (from `https://download.pytorch.org/whl/xpu`)
+- **vLLM-Omni** `0.32.0rc1` (built from source, `VLLM_OMNI_TARGET_DEVICE=xpu`)
+- **Diffusers** `0.40.0`
 - **ComfyUI** (run from source, native XPU support)
 
 Target hardware: 32x Intel Arc Pro B60 (Battlemage) / oneAPI 2026.1 / Level Zero.
@@ -38,8 +38,10 @@ rm -rf .venv && uv sync
 
 ## How it works
 
-- **XPU wheels** (`torch==2.12.0`, torchvision/audio, `triton-xpu`, `torchcodec`)
+- **XPU wheels** (`torch==2.14.0`, torchvision/audio, `triton-xpu`, `torchcodec`)
   are resolved from the `pytorch-xpu` index via `[tool.uv.index]` + `[tool.uv.sources]`.
+  `torchaudio` stays at `2.11.0`: it is the newest XPU build published, although
+  `torch` is already at 2.14.
 - **vllm / vllm-omni** are `path` sources (`vendor/`). Their `setup.py` must
   run against an installed XPU torch (vllm imports torch at module level), so:
   - `dependency-metadata` tells the resolver their requirements without
@@ -60,7 +62,7 @@ rm -rf .venv && uv sync
 
 ```bash
 .venv/bin/python -c "import torch; print(torch.__version__, torch.xpu.device_count())"
-# 2.12.0+xpu 32
+# 2.14.0+xpu 32
 
 .venv/bin/vllm serve --omni --help
 PYTHONPATH=vendor/ComfyUI .venv/bin/python -c "import comfy.model_management as mm; print(mm.get_torch_device())"   # xpu:0
@@ -115,13 +117,27 @@ Options:
 .venv/bin/vllm serve Qwen/Qwen2.5-Omni-7B --omni --port 8091
 ```
 
+That default assumes enough VRAM for all three stages (thinker, talker, code2wav)
+on one device. On 24 GiB cards the bundled deploy config does not fit, so place
+the stages across two GPUs and give the thinker less headroom:
+
+```bash
+.venv/bin/vllm serve Qwen/Qwen2.5-Omni-7B --omni --port 8091 \
+  --deploy-config deploy/qwen2_5_omni_2xb60.yaml
+```
+
 ### Diffusers
 
 ```python
 import torch, diffusers
-pipe = diffusers.StableDiffusionPipeline.from_pretrained("stabilityai/stable-diffusion-2-1", torch_dtype=torch.float16).to("xpu")
+pipe = diffusers.StableDiffusionPipeline.from_pretrained(
+    "stable-diffusion-v1-5/stable-diffusion-v1-5", dtype=torch.float16
+).to("xpu")
 pipe("a photo of a cat on the moon").images[0].save("out.png")
 ```
+
+(`stabilityai/stable-diffusion-2-1` is no longer publicly downloadable, and
+`torch_dtype=` is deprecated in diffusers 0.40 — use `dtype=`.)
 
 ### ComfyUI
 
@@ -132,8 +148,8 @@ pipe("a photo of a cat on the moon").images[0].save("out.png")
 ## Layout
 
 - `.venv/` — virtual environment (uv)
-- `vendor/vllm/` — vllm `v0.26.0` source checkout (path source)
-- `vendor/vllm-omni/` — vllm-omni `v0.26.0` source checkout (path source)
+- `vendor/vllm/` — vllm `v0.32.0` source checkout (path source)
+- `vendor/vllm-omni/` — vllm-omni `v0.32.0rc1` source checkout (path source)
 - `vendor/ComfyUI/` — ComfyUI source checkout (run in place)
 - `pyproject.toml` — declarative environment + `uv.lock`
 - `setup.sh` — one-command setup (oneAPI env + `uv sync`)

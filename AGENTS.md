@@ -1,0 +1,139 @@
+# AGENTS.md
+
+Intel XPU AI-stack scaffolding repo (PyTorch + vLLM-Omni + Diffusers + ComfyUI + LTX-2) on
+Intel Arc B60/B70 GPUs. Declarative env in `pyproject.toml`, everything else is thin wrappers.
+
+## Two virtual environments — the single most important fact
+
+| env | path | holds |
+|---|---|---|
+| main | `.venv/` | torch 2.14.0+xpu, vllm, vllm-omni, ComfyUI deps, the server, benchmarks |
+| LTX-2 | `vendor/LTX-2/.venv/` | ltx-core / ltx-pipelines on **torch 2.12**, deliberately isolated transformers version |
+
+The two torch versions differ on purpose (`setup.sh` pins the LTX venv to 2.12). Do not
+"harmonize" them; LTX-2 upstream is untested on 2.14.
+
+Always invoke a script with the interpreter that owns its deps. `ltx_server.py` itself runs in
+`.venv` but shells out to `ltx-gen.sh`, which uses the LTX venv — the split is intentional.
+
+## Commands
+
+```bash
+bash setup.sh                     # one-time: clones vendor/*, builds LTX venv, patches it, uv sync
+.venv/bin/python -c "import torch; print(torch.__version__, torch.xpu.device_count())"   # smoke test
+.venv/bin/vllm serve --omni --help
+PYTHONPATH=vendor/ComfyUI .venv/bin/python -c "import comfy.model_management as mm; print(mm.get_torch_device())"
+
+./run_vllm_tp.sh <TP> [port]      # vLLM TP inference, e.g. ./run_vllm_tp.sh 8 8000
+.venv/bin/python -u stress_vllm.py <concurrency> <max_tokens> <seconds>   # PCIe downgrade stress+monitor
+./run-ltx-server.sh              # LTX web UI, port 8090 (LTX_SERVER_PORT to override)
+./ltx-gen.sh [--distilled] --prompt "..." [flags...]
+./gpu-monitor.sh -B 70 --interval 2   # -B 60|70 maps to PCI id 0xe211/0xe223; omit for auto-detect
+.venv/bin/python bench_matmul.py --n 8192 --iters 10
+```
+
+No tests, linter, formatter, typechecker, or CI exist. Verification is the smoke commands above.
+Run a single thing rather than a suite.
+
+## `vendor/` is gitignored and rebuilt by `setup.sh`
+
+`vendor/vllm`, `vendor/vllm-omni`, `vendor/ComfyUI`, `vendor/LTX-2` are clones. Re-running
+`setup.sh` on an existing tree is safe (each step is guarded by `[ -d ]` / grep checks).
+
+`setup.sh` applies three idempotent `perl -0pi` XPU patches to LTX-2 source (XPU device selector,
+fp32 audio vocoder, cuDNN SDPA backend excluded). **These live only in the untracked checkout** —
+edit them in `setup.sh`, not in the vendor tree, or the change is silently lost on re-clone.
+
+Do not add anything under `vendor/` to git, and don't install LTX-2 packages without `--no-deps`:
+their `pyproject.toml` pins `torch = { index = "torch" }` (cu132) and would replace the XPU build.
+Never install their `natten` extra (pins torch 2.13.0+cu132).
+
+## uv resolution traps baked into `pyproject.toml`
+
+Don't "simplify" these away — each mirrors the official vLLM-Omni XPU Docker build:
+
+- `exclude-dependencies = ["triton"]` — `openai-whisper`/`xgrammar` pull stock triton, which
+  shadows `triton-xpu`. The `triton` import must resolve to `triton-xpu` (3.7.1).
+- `no-build-isolation-package = ["vllm", "vllm-omni"]` — their `setup.py` imports torch at module
+  level, so they must build inside the venv with XPU torch already present.
+- `[[tool.uv.dependency-metadata]]` — static `requires-dist` for both, so uv never executes their
+  `setup.py`. **When bumping vllm/vllm-omni, update these lists too**, or resolution silently drifts
+  from upstream requirements.
+- `extra-build-variables` sets `VLLM_TARGET_DEVICE=xpu` / `VLLM_OMNI_TARGET_DEVICE=xpu`.
+- `[tool.uv.workspace] exclude = ["vendor/*"]` stops uv auto-discovering the clones as members.
+
+`uv sync` compiles vllm + vllm-omni from source — it is slow, not hung.
+
+### Version pins that are not free choices
+
+- **`torch==2.14.0`, not `2.14.1`.** The XPU index has both, but vllm's `requirements/xpu.txt`
+  pins `torch==2.14.0`; resolving 2.14.1 fails the whole graph.
+- **`torchvision==0.29.0`** pairs exactly with torch 2.14.0. `0.29.1` accepts `torch>=2.14.0`
+  but is built against 2.14.1 — don't float it.
+- **`torchaudio` is frozen at `2.11.0`.** No 2.13/2.14 XPU build was ever published; 2.11.0 is
+  the newest on the index and is pinned explicitly so uv cannot silently drop it. It does load
+  and run against torch 2.14 (verified), despite being built for 2.11.
+- **`diffusers==0.40.0`** is a hard pin from vllm-omni, even though PyPI is at 0.41.x.
+- **`vllm-omni==0.32.0rc1` is a prerelease by necessity** — no stable omni release builds
+  against vLLM 0.32 / torch 2.14 yet.
+- `transformers>=5.16.1,<5.20.0` comes from both vllm and vllm-omni; ComfyUI only sets a floor.
+
+### Failure modes already hit once — do not re-debug
+
+- **`ModuleNotFoundError: openai_harmony`** despite `oss-harmony` being installed. `oss-harmony`
+  is a metadata-only shim that re-exports the `openai_harmony` module; if uv's cache holds a
+  half-written install, site-packages gets only the dist-info. Fix:
+  `uv cache clean oss-harmony && uv sync --reinstall-package oss-harmony`. The PyPI wheel does
+  contain `openai_harmony/`, so this is cache corruption, not a bad release.
+- **`output/` missing** crashes `ltx_server.py` at import (see below), and `ltx-gen.sh` only
+  creates it at generation time — run `mkdir -p output` before the server.
+- **`torchcodec` cannot load** unless the host has system FFmpeg shared libs. This host has none
+  (`libavutil.so.*` absent, no `ffmpeg` binary), so `torchcodec` import fails. Video files are
+  still produced through `imageio-ffmpeg`; verify them with **PyAV** (`import av`), not torchcodec.
+- **LTX `RuntimeError: Input type (float) and bias type (c10::BFloat16)`** means the vocoder
+  fp32 patch is no longer applied. Upstream moved the file from
+  `packages/ltx-pipelines/src/ltx_pipelines/utils/blocks.py` to
+  `.../utils/blocks/audio_decoder.py`; `setup.sh` now patches the new path and guards with
+  `[ -f ]`. When LTX-2 upstream refactors, re-check all three patch targets by hand.
+- **LTX venv missing modules** (`colour`, `colour-science`) is expected fallout of installing
+  ltx-core with `--no-deps`: its own dependencies are never resolved. Add anything new to the
+  explicit list in `setup.sh` instead of dropping `--no-deps`.
+
+## Runtime environment requirements (opposite per script — do not "fix")
+
+- `run_vllm_tp.sh` deliberately **excludes** oneAPI `bin` from `PATH` and unsets `LD_LIBRARY_PATH`,
+  so triton JIT-compiles against the venv's `libsycl.so.8`. It also wipes `~/.triton/cache` first.
+  A stale cache (JIT artifacts bound to system `libsycl.so.9`) segfaults. Keep both behaviours.
+- `ltx-gen.sh` / `run-ltx-server.sh` deliberately **source** `/opt/intel/oneapi/setvars.sh`.
+- oneAPI env scripts aren't `set -u` safe; they wrap sourcing in `set +u` / `set -u`.
+
+## `output/` must exist before starting the server
+
+`output/` is untracked, so a fresh clone has none — and `ltx_server.py` mounts it at import time:
+`RuntimeError: Directory '.../output' does not exist`. Do `mkdir -p output` first.
+
+## Hardcoded paths — change them for other hosts
+
+- `run_vllm_tp.sh`: `MODEL=/home/lm/work/data/Qwen3.6-27B`
+- `stress_vllm.py`: same model path, `URL=localhost:8000`, plus a fixed `LINK_PATHS` BDF list for
+  this 8x-switch topology
+- `ltx-gen.sh`: models default to `$HOME/paul/models/ltx-2.5`, but on this host they live in
+  `/home/lm/work/models/ltx-2.5` — always pass `LTX_MODELS=/home/lm/work/models/ltx-2.5`.
+- LTX `--num-frames` must be `8k+1` (33, 121, 161); the server snaps user input to that grid
+
+## Other verified XPU facts
+
+- `xpu-smi`/Sysman can't read telemetry on these cards — `gpu_monitor.py` reads `xe` sysfs instead.
+- Qwen2.5-Omni needs 3 stages (thinker 16.7 GiB + talker 3.6 GiB + code2wav 1.5 GiB). On 24 GiB
+  cards all three cannot share one device, and a global `--gpu-memory-utilization` overrides every
+  per-stage value — use `--deploy-config deploy/qwen2_5_omni_2xb60.yaml` instead of CLI memory flags.
+- No native int4 matmul (`torch.quint4x2`); emulate 4-bit GEMM as two int8 GEMMs.
+- SDPA on XPU must avoid the cuDNN backend (`CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH`); MATH works.
+- TP=8 heavy allreduce can permanently drop a PCIe root port to Gen1 and only a power cycle
+  recovers it — see `vllm_tp8_pcie_downgrade.md`.
+
+## Where things are
+
+- `ltx_server.py` + `static/index.html` — LTX web UI; state is server-side, browser polls
+- `ltx-gen.md` — LTX CLI usage guide · `vllm_tp8_pcie_downgrade.md` — PCIe downgrade repro record
+- `vendor/LTX-2/packages/ltx-pipelines/src/ltx_pipelines/CLAUDE.md` — upstream LTX conventions

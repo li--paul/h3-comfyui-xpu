@@ -16,3 +16,6 @@ igdrcl_dumped.config
 
 # generated videos
 output/*.mp4
+
+# test renders (e.g. the diffusers Usage snippet)
+output/*.png
