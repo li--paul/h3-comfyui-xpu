@@ -172,7 +172,8 @@ many cards at once), not a package bug.
 
 Driver: `./vllm-omni-run.sh` (`download` / `serve` / `generate` / `run` / `stop` / `status`).
 It handles the partition + LoRA download, TP/DLO sizing, the LoRA's mandatory
-steps/flow_shift, and writes to `vllm-omni-output/`.
+steps/flow_shift, and writes to `vllm-omni-output/`. Full measurement tables
+(runtime × precision × steps, memory, quality, gaps) are in `perf.md`.
 
 **Do not treat vLLM-Omni as a working H3 path on XPU.** It starts, serves, and returns a
 valid mp4 with the right shape and audio, but the video content is degenerate (dark, blurred,

@@ -192,6 +192,22 @@ tuning knobs.
 > attention backends were tested and all fail identically — it looks like the XPU
 > diffusion path. ComfyUI remains the working H3 path; see `AGENTS.md`.
 
+### Performance
+
+Full measurements — quantization, step counts, memory, and the quality verdict
+per configuration — live in **[perf.md](perf.md)**. Headline numbers for the same
+5-second 1376×768 shot (seed 1001):
+
+| runtime | precision | steps | cards | wall | peak VRAM | output |
+|---|---|---|---:|---:|---:|---|
+| ComfyUI | INT8 ConvRot | 8 | 1 | 652 s | 21.4 GB | correct |
+| vLLM-Omni | FP8 online | 9 | 2 | 360–370 s | 14.8 GiB/rank | broken |
+| vLLM-Omni | BF16 | 9 | 2 | 371 s | 18.7 GiB/rank | broken |
+
+vLLM-Omni is ~1.8× faster but produces unusable video on XPU. FP8 saves ~26 % of
+per-rank memory versus BF16 at roughly the same speed, and precision is not the
+cause of the quality failure — BF16 fails identically.
+
 ## Layout
 
 - `.venv/` — virtual environment (uv)
@@ -201,5 +217,6 @@ tuning knobs.
 - `h3_input/` — MiniMax-H3 custom nodes, API workflow, and reference assets
 - `h3_output/` — H3 test renders (sample output committed; `server.log` ignored)
 - `vllm-omni-output/` — H3 renders and server logs from `vllm-omni-run.sh`
+- `perf.md` — measured H3 performance/quality across runtimes, precisions, steps
 - `pyproject.toml` — declarative environment + `uv.lock`
 - `setup.sh` — one-command setup (oneAPI env + `uv sync`)
