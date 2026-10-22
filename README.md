@@ -166,6 +166,32 @@ Needs the H3 weights at `~/work/models/ComfyUI-MiniMax-H3` (`H3_MODELS=` to
 override); everything else — custom nodes, workflow, reference images — is
 vendored in `h3_input/`. Expect ~11 min on one Arc Pro B60 (8 steps at ~70 s/step).
 
+### MiniMax-H3 via vLLM-Omni
+
+`vllm-omni-run.sh` drives the same model through vLLM-Omni instead (2+ GPUs,
+tensor parallel + layerwise offload), writing to `vllm-omni-output/`:
+
+```bash
+./vllm-omni-run.sh download --task ref2va        # checkpoint + turbo LoRA
+./vllm-omni-run.sh status
+./vllm-omni-run.sh run --gpus 2 --precision fp8 --lora 8step
+./vllm-omni-run.sh run --profile smoke           # 1024x576, 2 steps, no LoRA
+./vllm-omni-run.sh serve --gpus 2 --precision bf16 --keep-server
+./vllm-omni-run.sh generate --prompt "a fox in falling snow"
+./vllm-omni-run.sh stop
+```
+
+`--precision` is `fp8` or `bf16`; `--task` is `ref2va` (image references) or
+`fl2va` (text/first-frame only); `--lora 8step|4step|none` pins the turbo
+schedule (the server rejects a step/flow_shift mismatch, so the script sets them
+for you). `--attn TORCH_SDPA`, `--no-dlo` and `--resident-layers N` expose the
+tuning knobs.
+
+> **Known issue:** on XPU this path serves correctly and returns a valid mp4 with
+> audio, but the picture is degenerate (dark/blurred). FP8, BF16 and both
+> attention backends were tested and all fail identically — it looks like the XPU
+> diffusion path. ComfyUI remains the working H3 path; see `AGENTS.md`.
+
 ## Layout
 
 - `.venv/` — virtual environment (uv)
@@ -174,5 +200,6 @@ vendored in `h3_input/`. Expect ~11 min on one Arc Pro B60 (8 steps at ~70 s/ste
 - `vendor/ComfyUI/` — ComfyUI source checkout (run in place)
 - `h3_input/` — MiniMax-H3 custom nodes, API workflow, and reference assets
 - `h3_output/` — H3 test renders (sample output committed; `server.log` ignored)
+- `vllm-omni-output/` — H3 renders and server logs from `vllm-omni-run.sh`
 - `pyproject.toml` — declarative environment + `uv.lock`
 - `setup.sh` — one-command setup (oneAPI env + `uv sync`)

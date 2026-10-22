@@ -170,6 +170,10 @@ many cards at once), not a package bug.
 
 ## MiniMax-H3 on vLLM-Omni — starts but output is broken (2026-10-22)
 
+Driver: `./vllm-omni-run.sh` (`download` / `serve` / `generate` / `run` / `stop` / `status`).
+It handles the partition + LoRA download, TP/DLO sizing, the LoRA's mandatory
+steps/flow_shift, and writes to `vllm-omni-output/`.
+
 **Do not treat vLLM-Omni as a working H3 path on XPU.** It starts, serves, and returns a
 valid mp4 with the right shape and audio, but the video content is degenerate (dark, blurred,
 zoomed into a fragment of the reference image). Same weights, same prompt, same reference
