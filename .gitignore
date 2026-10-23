@@ -31,3 +31,8 @@ h3_input/loras/
 vllm-omni-output/
 
 
+
+# diffusers H3 experiment output
+diffusers-output/*
+!diffusers-output/h3_ref2va_diffusers_bf16_1376x768.mp4
+!diffusers-output/contact_sheet.png

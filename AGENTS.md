@@ -177,8 +177,9 @@ steps/flow_shift, and writes to `vllm-omni-output/`. Full measurement tables
 
 **Do not treat vLLM-Omni as a working H3 path on XPU.** It starts, serves, and returns a
 valid mp4 with the right shape and audio, but the video content is degenerate (dark, blurred,
-zoomed into a fragment of the reference image). Same weights, same prompt, same reference
-image, same seed produce a correct clip in ComfyUI, so this is not a prompt or weight problem.
+zoomed into a fragment of the reference image). **ComfyUI and diffusers both produce a correct
+clip from the same checkpoint and seed**, so this is a vLLM-Omni XPU fault, not hardware or
+weights — see `perf.md` for the frame statistics that separate the three runtimes.
 
 Measured on 2× Arc Pro B60, Ref2VA 135 GiB partition at `~/work/models/MiniMax-H3/Ref2VA`,
 TP2 + DLO (12 resident layers) + tiled VAE, turbo LoRA
@@ -199,12 +200,24 @@ Things this rules out, so don't re-test them:
 - **Not VRAM.** Peak 18.7 GiB of 23.9 GiB, no `DEVICE_LOST`, no xe/GuC faults.
 - **Not startup.** Engine comes up in ~120 s and every request returns HTTP 200.
 
-Leading suspect is the **XPU diffusion execution path** (layerwise offload staging or
-tensor-parallel sharding of the DiT producing wrong activations), since `platforms/xpu`
+Leading suspect is the **XPU diffusion execution path** in vLLM-Omni (layerwise offload staging
+or tensor-parallel sharding of the DiT producing wrong activations), since `platforms/xpu`
 provides its own diffusion attention backend and none of the H3 recipes cover XPU.
-Next thing to try: `--num-gpus 1` without DLO (needs ~62 GiB, so it will OOM on one
-24 GiB card — try FP8 single-GPU instead), or a T2VA request on the FL2VA partition to see
-whether reference conditioning specifically is what breaks.
+
+Confirmed by contrast: the diffusers 5-stage harness at `~/work/simon/h3/minimax-h3-diffuser`
+runs the same BF16 checkpoint layer-streamed on one card (peak 17.6 GiB) and produces a correct
+clip — frame mean 121.2 / std 65.7 versus vLLM-Omni's 43.0 / 32.9. Use it as the reference
+oracle; `H3_WEIGHTS_ROOT=~/work/models/MiniMax-H3` and `H3_RUNS_ROOT=<repo>/diffusers-output/runs`,
+spec at `diffusers-output/cfg/`.
+
+**Never load the whole 135 GiB partition across many cards at once.** Doing so with
+`device_map="balanced"` over 16 XPUs wedged three GPUs (`xe ... device wedged, needs recovery`,
+GuC queue timeouts) and required a reboot; a second run then died mid-eval and took the box down
+again. Stream one block at a time on one card instead — that shape has produced zero driver
+events across repeated runs.
+
+Next thing to try on vLLM-Omni: a T2VA request on the FL2VA partition, or a single-GPU FP8 run
+without DLO, to separate "reference conditioning" from "sharding/offload".
 
 Note the recipe constraint too: the `_comfyui_` LoRA export is refused by name, and the
 Diffusers artifact mandates `num_inference_steps=9` with `flow_shift=6` — the server

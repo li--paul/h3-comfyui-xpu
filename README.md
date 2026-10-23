@@ -201,12 +201,14 @@ per configuration — live in **[perf.md](perf.md)**. Headline numbers for the s
 | runtime | precision | steps | cards | wall | peak VRAM | output |
 |---|---|---|---:|---:|---:|---|
 | ComfyUI | INT8 ConvRot | 8 | 1 | 652 s | 21.4 GB | correct |
+| diffusers | BF16, layer-streamed | 8 | 1 | ~920 s | 17.6 GiB | correct |
 | vLLM-Omni | FP8 online | 9 | 2 | 360–370 s | 14.8 GiB/rank | broken |
 | vLLM-Omni | BF16 | 9 | 2 | 371 s | 18.7 GiB/rank | broken |
 
-vLLM-Omni is ~1.8× faster but produces unusable video on XPU. FP8 saves ~26 % of
-per-rank memory versus BF16 at roughly the same speed, and precision is not the
-cause of the quality failure — BF16 fails identically.
+**Two runtimes produce correct video; vLLM-Omni does not.** Same checkpoint, same
+seed, same prompt — so the fault is in vLLM-Omni's XPU diffusion path, not the
+hardware, weights, or precision. FP8 is vLLM-Omni-only: diffusers can run BF16
+here but has no usable INT8 backend, and INT8 ConvRot remains ComfyUI-only.
 
 ## Layout
 

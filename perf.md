@@ -8,6 +8,8 @@ precision and step-count effects.
 - oneAPI 2026.1, Level Zero, driver as shipped on Ubuntu 26.04
 - ComfyUI 0.42.0 in `.venv` (torch 2.14.0+xpu) — see `h3-test.sh`
 - vLLM-Omni 0.32.0rc1 / vLLM 0.32.0 (torch 2.14.0+xpu) — see `vllm-omni-run.sh`
+- diffusers 0.41.0 / torch 2.14.1+xpu in the 5-stage harness at
+  `~/work/simon/h3/minimax-h3-diffuser` (layer-streamed, one card)
 - Weights: Ref2VA partition, `~/work/models/MiniMax-H3/Ref2VA` (135 GiB, BF16)
 - Turbo LoRA: `minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors` (rank 128)
 
@@ -62,6 +64,28 @@ Every request returned HTTP 200 with a well-formed 124-frame H.264 mp4 carrying
 > fragment of the reference image instead of the described road. It is a content
 > failure, not a container or audio failure.
 
+## diffusers
+
+Single card, BF16, **root modular layout** (`~/work/models/MiniMax-H3`, not the
+`Ref2VA/` partition). Weights are streamed layer by layer: the DiT is built on
+`meta` and each of its 50 blocks is uploaded just before use, so peak VRAM stays
+at 17.6 GiB while RSS holds the 62 GiB checkpoint.
+
+Run through `~/work/simon/h3/minimax-h3-diffuser` (5 stages: te → dit →
+vae_video → vae_audio → media), `--ops official`, seed 1001, 1376×768, 124 frames:
+
+| stage | wall | note |
+|---|---:|---|
+| te | 28.2 s | 51 layers streamed, 534 tokens → `(1, 7710, 5120)` bf16 |
+| dit | **839.7 s** | 7 evals at 116.9 s/eval, 50 blocks streamed per eval |
+| vae_video | 45.2 s | |
+| vae_audio | 4.7 s | |
+| media | 1.9 s | x264 + AAC mux via system `ffmpeg` |
+| **total** | **~920 s** | peak VRAM 17.6 GiB, RSS 66.5 GB |
+
+Output: 124 frames, 1376×768, 5.17 s, AAC 32 kHz stereo, frame mean **121.2**,
+std **65.7** — **correct**.
+
 ## Quantization comparison
 
 Same shape, same 9-step LoRA schedule, only precision changed:
@@ -70,16 +94,24 @@ Same shape, same 9-step LoRA schedule, only precision changed:
 |---|---|---:|---:|---:|---|
 | FP8 online | ~half, quantized at load | 360–370 s | 14.8 GiB | — | 40.8 / 39.8 (28.7 / 30.6) |
 | BF16 | full checkpoint | 371 s | 18.7 GiB | +26 % memory, +0–3 % time | 43.0 (32.9) |
+| BF16 (diffusers) | full checkpoint, layer-streamed | ~920 s | 17.6 GiB on 1 card | n/a, different runtime | **121.2 (65.7)** |
 | INT8 ConvRot (ComfyUI) | 21 GB single file | 652 s | ~21.4 GB on 1 card | n/a, different runtime | **109.4 (69.6)** |
 
 Reading this:
 
 - FP8 does what it advertises — **~26 % less per-rank memory**, essentially free
   in wall time.
-- **Precision is not what breaks the picture.** BF16 is just as bad as FP8 (43.0
-  vs 40.8 mean), so the failure is not quantization.
-- INT8 ConvRot has **no vLLM-Omni equivalent**. FP8 is the only 8-bit path there;
-  the ComfyUI INT8 numbers exist only because that runtime has its own quantizer.
+- **Precision is not what breaks the vLLM-Omni picture.** BF16 there is just as
+  bad as FP8 (43.0 vs 40.8 mean).
+- **INT8 ConvRot has no diffusers or vLLM-Omni equivalent.** Diffusers can only
+  do BF16 here: `torchao`/`bitsandbytes`/`quanto`/`sdnq` are all absent, GGUF has
+  no H3 file, and diffusers' `AutoRoundQuantizer` refuses on-the-fly quantization
+  (`requires_calibration = True`). The harness supports `int8_convrot` when the
+  checkpoint's `config.json` declares it — ours does not (it is the full BF16
+  release), so INT8 stays ComfyUI-only.
+- **Two independent runtimes produce correct video at BF16-with-offload**
+  (diffusers 121.2, ComfyUI 109.4) while vLLM-Omni's BF16 produces 43.0. The
+  difference is the runtime, not the precision or the weights.
 
 ## Step comparison
 
@@ -118,21 +150,44 @@ LoRA is loaded.
 | path | usable output? | evidence |
 |---|---|---|
 | ComfyUI 0.39 / 0.42, INT8 ConvRot, 8 steps | **yes** | correct village-road clip; frame std 69.6; bit-identical across versions |
+| diffusers 0.41, BF16, layer-streamed, 1 card | **yes** | correct village-road clip; frame mean 121.2, std 65.7 |
 | vLLM-Omni, FP8 or BF16, 9 steps | **no** | dark blurred crop of the reference image; frame std 28.7–32.9; identical across precision and attention backend |
 | vLLM-Omni, 2 steps, no LoRA | **no** | blurry smear, no scene structure |
 
-Isolation performed (all negative): precision (FP8 vs BF16), attention backend
-(FLASH_ATTN vs TORCH_SDPA), LoRA and step schedule (9-step vs 2-step no-LoRA),
-VRAM (18.7 of 23.9 GiB peak), and start-up (healthy, 70–120 s). The remaining
-suspect is the **XPU diffusion execution path** in vLLM-Omni — layerwise-offload
-staging or TP sharding of the DiT producing wrong activations. No MiniMax-H3
-recipe upstream covers XPU (CUDA and NPU only).
+**The fault is in vLLM-Omni's XPU diffusion execution path, not in the hardware,
+the weights, or the precision.** Two independent implementations running BF16
+with layer/layerwise offload on the same card and the same checkpoint produce a
+correct shot; vLLM-Omni does not.
+
+Isolation performed on vLLM-Omni (all negative): precision (FP8 vs BF16),
+attention backend (FLASH_ATTN vs TORCH_SDPA), LoRA and step schedule (9-step vs
+2-step no-LoRA), VRAM (18.7 of 23.9 GiB peak), and start-up (healthy, 70–120 s).
+No MiniMax-H3 recipe upstream covers XPU (CUDA and NPU only), which is consistent
+with `platforms/xpu` providing its own diffusion attention backend.
+
+### Operational hazard found the hard way
+
+Loading the whole 135 GiB partition across 16 cards at once with
+`device_map="balanced"` **wedged three GPUs** (`xe ... device wedged, needs
+recovery`, GuC queue timeouts) and left the stack unusable until a reboot. That
+matches the delivery manifest's `UR_RESULT_ERROR_DEVICE_LOST` warning for
+concurrent ~20 GB loads. Streaming one block at a time on a single card (the
+diffusers path above) peaked at 17.6 GiB with no driver events at all — prefer
+that shape.
 
 ## Reproduce
 
 ```bash
 # ComfyUI (working path) — ~11 min on one card
 ./h3-test.sh 0
+
+# diffusers (working path) — ~15 min on one card, layer-streamed
+cd ~/work/simon/h3/minimax-h3-diffuser
+H3_WEIGHTS_ROOT=~/work/models/MiniMax-H3 \
+H3_RUNS_ROOT=/home/lm/work/paul/uv_scaffolding_xpu/diffusers-output/runs \
+  .venv/bin/python run.py \
+    --config-dir /home/lm/work/paul/uv_scaffolding_xpu/diffusers-output/cfg \
+    shot01-diffusers xpu all --ops official
 
 # vLLM-Omni (broken path) — ~8 min on two cards
 ./vllm-omni-run.sh run --gpus 2 --precision fp8 --lora 8step
