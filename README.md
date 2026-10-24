@@ -187,10 +187,9 @@ schedule (the server rejects a step/flow_shift mismatch, so the script sets them
 for you). `--attn TORCH_SDPA`, `--no-dlo` and `--resident-layers N` expose the
 tuning knobs.
 
-> **Known issue:** on XPU this path serves correctly and returns a valid mp4 with
-> audio, but the picture is degenerate (dark/blurred). FP8, BF16 and both
-> attention backends were tested and all fail identically — it looks like the XPU
-> diffusion path. ComfyUI remains the working H3 path; see `AGENTS.md`.
+> **Configuration gotcha:** the turbo adapter must be sent in each request, not just
+> preloaded. Without it the server runs the base model at 8 steps and the clip comes out
+> dark and blurred. `vllm-omni-run.sh` handles this; see `perf.md` for the before/after.
 
 ### Performance
 
@@ -201,14 +200,17 @@ per configuration — live in **[perf.md](perf.md)**. Headline numbers for the s
 | runtime | precision | steps | cards | wall | peak VRAM | output |
 |---|---|---|---:|---:|---:|---|
 | ComfyUI | INT8 ConvRot | 8 | 1 | 652 s | 21.4 GB | correct |
+| vLLM-Omni | FP8 online + turbo LoRA | 8 | 2 | 338–349 s | 14.7 GiB/rank | correct |
+| vLLM-Omni | BF16 + turbo LoRA | 8 | 2 | 375 s | 18.7 GiB/rank | correct |
 | diffusers | BF16, layer-streamed | 8 | 1 | ~920 s | 17.6 GiB | correct |
-| vLLM-Omni | FP8 online | 9 | 2 | 360–370 s | 14.8 GiB/rank | broken |
-| vLLM-Omni | BF16 | 9 | 2 | 371 s | 18.7 GiB/rank | broken |
 
-**Two runtimes produce correct video; vLLM-Omni does not.** Same checkpoint, same
-seed, same prompt — so the fault is in vLLM-Omni's XPU diffusion path, not the
-hardware, weights, or precision. FP8 is vLLM-Omni-only: diffusers can run BF16
-here but has no usable INT8 backend, and INT8 ConvRot remains ComfyUI-only.
+All four produce a correct clip once configured properly. FP8 is the sweet spot for
+vLLM-Omni: ~27 % less per-rank memory than BF16 and 7–11 % faster.
+
+> **Gotcha:** the turbo adapter must be named **in the request**
+> (`-F 'lora={"name":…,"path":…}'`). A server-side `--lora-path` only preloads it; without
+> the request field the server silently runs the base model, and 8 steps on the base model
+> with the turbo schedule yields a dark, blurred clip. `vllm-omni-run.sh` now sends it for you.
 
 ## Layout
 

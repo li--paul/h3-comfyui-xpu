@@ -168,47 +168,39 @@ zero-mp4 output dirs from 2026-10-20 were load-concurrency casualties (the
 delivery manifest describes `UR_RESULT_ERROR_DEVICE_LOST` when ~20 GB lands on
 many cards at once), not a package bug.
 
-## MiniMax-H3 on vLLM-Omni — starts but output is broken (2026-10-22)
+## MiniMax-H3 on vLLM-Omni — works, but the adapter must be in the request
 
 Driver: `./vllm-omni-run.sh` (`download` / `serve` / `generate` / `run` / `stop` / `status`).
 It handles the partition + LoRA download, TP/DLO sizing, the LoRA's mandatory
 steps/flow_shift, and writes to `vllm-omni-output/`. Full measurement tables
 (runtime × precision × steps, memory, quality, gaps) are in `perf.md`.
 
-**Do not treat vLLM-Omni as a working H3 path on XPU.** It starts, serves, and returns a
-valid mp4 with the right shape and audio, but the video content is degenerate (dark, blurred,
-zoomed into a fragment of the reference image). **ComfyUI and diffusers both produce a correct
-clip from the same checkpoint and seed**, so this is a vLLM-Omni XPU fault, not hardware or
-weights — see `perf.md` for the frame statistics that separate the three runtimes.
+### MiniMax-H3 on vLLM-Omni
+
+Working, after one important correction: **`--lora-path` only preloads an adapter; it must be
+named in each request** via `-F 'lora={"name":…,"path":…}'`. Without that field the server runs
+the base model, and 8 steps with the turbo schedule produces a dark blurred clip — which an
+earlier version of this file wrongly attributed to vLLM-Omni's XPU path.
+
+Driver: `./vllm-omni-run.sh` (`download` / `serve` / `generate` / `run` / `stop` / `status`).
+It sends the `lora` field, pins the artifact's mandatory step count
+(`num_inference_steps=8` for the 8-step file), and raises
+`VLLM_OMNI_DLO_DP_WAVE_TIMEOUT` so runs over 600 s don't die with
+`RPC call to execute_model timed out`. Full tables in `perf.md`.
 
 Measured on 2× Arc Pro B60, Ref2VA 135 GiB partition at `~/work/models/MiniMax-H3/Ref2VA`,
 TP2 + DLO (12 resident layers) + tiled VAE, turbo LoRA
-`minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors`, 9 steps, seed 1001, 1376×768:
+`minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors`, seed 1001, 1376×768:
 
-| variant | E2E | peak/rank | frame mean (std) |
-|---|---:|---:|---|
-| ComfyUI INT8 ConvRot | 653 s | ~21 GiB | **109.4 (69.6)** |
-| vLLM-Omni FP8 online, FLASH_ATTN | 360 s | 14.8 GiB | 40.8 (28.7) |
-| vLLM-Omni BF16, FLASH_ATTN | 371 s | 18.7 GiB | 43.0 (32.9) |
-| vLLM-Omni BF16, TORCH_SDPA | 450 s | 18.4 GiB | 43.4 (32.6) |
+| variant | steps | E2E | peak/rank | frame mean (std) |
+|---|---:|---:|---:|---|
+| FP8 + adapter bound in request | 8 | 338–349 s | 14.7 GiB | **114.6 (68.4)** |
+| BF16 + adapter bound in request | 8 | 375 s | 18.7 GiB | **114.7 (68.9)** |
+| FP8, base model, `flow_shift=12` | 50 | 943 s | 12.4 GiB | 71.8 (71.8) |
+| FP8/BF16, adapter **not** bound | 9 | 360–371 s | 14.8–18.7 GiB | 40.8–43.0 (~30) |
 
-Things this rules out, so don't re-test them:
-
-- **Not FP8.** BF16 is equally degraded, so quantization precision is not the cause.
-- **Not the attention backend.** FLASH_ATTN and TORCH_SDPA give the same result.
-- **Not the turbo LoRA or step schedule.** The 2-step smoke is equally blurred.
-- **Not VRAM.** Peak 18.7 GiB of 23.9 GiB, no `DEVICE_LOST`, no xe/GuC faults.
-- **Not startup.** Engine comes up in ~120 s and every request returns HTTP 200.
-
-Leading suspect is the **XPU diffusion execution path** in vLLM-Omni (layerwise offload staging
-or tensor-parallel sharding of the DiT producing wrong activations), since `platforms/xpu`
-provides its own diffusion attention backend and none of the H3 recipes cover XPU.
-
-Confirmed by contrast: the diffusers 5-stage harness at `~/work/simon/h3/minimax-h3-diffuser`
-runs the same BF16 checkpoint layer-streamed on one card (peak 17.6 GiB) and produces a correct
-clip — frame mean 121.2 / std 65.7 versus vLLM-Omni's 43.0 / 32.9. Use it as the reference
-oracle; `H3_WEIGHTS_ROOT=~/work/models/MiniMax-H3` and `H3_RUNS_ROOT=<repo>/diffusers-output/runs`,
-spec at `diffusers-output/cfg/`.
+All of these return HTTP 200 with a well-formed 124-frame mp4 carrying AAC audio and no
+`DEVICE_LOST` or xe/GuC faults; only the last row looks wrong, and that is the harness bug.
 
 **Never load the whole 135 GiB partition across many cards at once.** Doing so with
 `device_map="balanced"` over 16 XPUs wedged three GPUs (`xe ... device wedged, needs recovery`,
@@ -216,12 +208,13 @@ GuC queue timeouts) and required a reboot; a second run then died mid-eval and t
 again. Stream one block at a time on one card instead — that shape has produced zero driver
 events across repeated runs.
 
-Next thing to try on vLLM-Omni: a T2VA request on the FL2VA partition, or a single-GPU FP8 run
-without DLO, to separate "reference conditioning" from "sharding/offload".
+The diffusers 5-stage harness at `~/work/simon/h3/minimax-h3-diffuser` is the useful reference
+oracle (layer-streamed, one card): `H3_WEIGHTS_ROOT=~/work/models/MiniMax-H3`,
+`H3_RUNS_ROOT=<repo>/diffusers-output/runs`, spec at `diffusers-output/cfg/`.
 
-Note the recipe constraint too: the `_comfyui_` LoRA export is refused by name, and the
-Diffusers artifact mandates `num_inference_steps=9` with `flow_shift=6` — the server
-rejects mismatches.
+Recipes are written for `main`, so prefer the installed code over the docs when they disagree:
+the 8-step artifact requires `num_inference_steps=8` (not the 9 sigma points the recipe table
+lists), and `_comfyui_` LoRA exports are refused by name.
 
 ## Other verified XPU facts
 

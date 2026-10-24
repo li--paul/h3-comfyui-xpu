@@ -48,21 +48,26 @@ model resident at a time.
 Two cards, TP2 + distributed layerwise offload (12 resident DiT layers) + tiled
 VAE patch-parallel 2. Server start-up 70–120 s, excluded from the numbers below.
 
-| # | precision | attention | LoRA | steps | flow shift | shape | E2E | peak/rank | frame mean (std) | verdict |
+| # | precision | attention | LoRA in request | steps | flow shift | shape | E2E | peak/rank | frame mean (std) | verdict |
 |---|---|---|---|---|---:|---:|---|---:|---:|---|---|
-| 1 | FP8 online | FLASH_ATTN | 8-step | 9 | 6 | 1376×768 | 360 s | 14.8 GiB | 40.8 (28.7) | broken |
-| 2 | FP8 online | FLASH_ATTN | 8-step | 9 | 6 | 1376×768 | 370 s | 14.8 GiB | 39.8 (30.6) | broken |
-| 3 | BF16 | FLASH_ATTN | 8-step | 9 | 6 | 1376×768 | 371 s | 18.7 GiB | 43.0 (32.9) | broken |
-| 4 | BF16 | TORCH_SDPA | 8-step | 9 | 6 | 1376×768 | 450 s | 18.4 GiB | 43.4 (32.6) | broken |
-| 5 | FP8 online | FLASH_ATTN | none | 2 | 12 | 1024×576 | 98 s | 12.8 GiB | 71.7 (70.5) | broken |
-| 6 | FP8 online | FLASH_ATTN | none | 2 | 12 | 1024×576 | 78 s | 11.8 GiB | 74.9 (67.8) | broken |
+| 1 | FP8 online | FLASH_ATTN | **yes** | 8 | 6 | 1376×768 | 338–349 s | 14.7 GiB | **114.6 (68.4)** | **correct** |
+| 2 | BF16 | FLASH_ATTN | **yes** | 8 | 6 | 1376×768 | 375 s | 18.7 GiB | **114.7 (68.9)** | **correct** |
+| 3 | FP8 online | FLASH_ATTN | none, base model | 50 | 12 | 1024×576 | 943 s | 12.4 GiB | 71.8 (71.8) | correct |
+| 4 | FP8 online | FLASH_ATTN | *not bound* | 9 | 6 | 1376×768 | 360–370 s | 14.8 GiB | 40.8 (28.7) | under-denoised |
+| 5 | BF16 | FLASH_ATTN | *not bound* | 9 | 6 | 1376×768 | 371 s | 18.7 GiB | 43.0 (32.9) | under-denoised |
+| 6 | BF16 | TORCH_SDPA | *not bound* | 9 | 6 | 1376×768 | 450 s | 18.4 GiB | 43.4 (32.6) | under-denoised |
+| 7 | FP8 online | FLASH_ATTN | none | 2 | 12 | 1024×576 | 78–98 s | 12.8 GiB | 71.7 (70.5) | under-denoised |
+
+Rows 1–3 are the valid configurations. Rows 4–7 are kept because they document a harness
+mistake rather than a runtime property: rows 4–6 ran the **base model** on the turbo
+schedule, and row 7 is simply 2 steps of anything.
 
 Every request returned HTTP 200 with a well-formed 124-frame H.264 mp4 carrying
 32 kHz stereo AAC. No `DEVICE_LOST`, no xe/GuC faults, no OOM.
 
-> **Broken** means the picture is degenerate: dark, blurred, and zoomed into a
-> fragment of the reference image instead of the described road. It is a content
-> failure, not a container or audio failure.
+> Rows marked *under-denoised* are dark and blurred. That is the signature of running the
+> base model on the turbo schedule, not a container or audio failure — see the correction
+> below.
 
 ## diffusers
 
@@ -92,26 +97,22 @@ Same shape, same 9-step LoRA schedule, only precision changed:
 
 | precision | DiT weights | E2E | peak/rank | Δ vs FP8 | frame mean (std) |
 |---|---|---:|---:|---:|---|
-| FP8 online | ~half, quantized at load | 360–370 s | 14.8 GiB | — | 40.8 / 39.8 (28.7 / 30.6) |
-| BF16 | full checkpoint | 371 s | 18.7 GiB | +26 % memory, +0–3 % time | 43.0 (32.9) |
-| BF16 (diffusers) | full checkpoint, layer-streamed | ~920 s | 17.6 GiB on 1 card | n/a, different runtime | **121.2 (65.7)** |
-| INT8 ConvRot (ComfyUI) | 21 GB single file | 652 s | ~21.4 GB on 1 card | n/a, different runtime | **109.4 (69.6)** |
+| FP8 online | ~half, quantized at load | 338–349 s | 14.7 GiB | — | **114.6 (68.4)** |
+| BF16 | full checkpoint | 375 s | 18.7 GiB | +27 % memory, +7–11 % time | **114.7 (68.9)** |
+| BF16 (diffusers) | full checkpoint, layer-streamed | ~920 s | 17.6 GiB on 1 card | n/a, different runtime | 121.2 (65.7) |
+| INT8 ConvRot (ComfyUI) | 21 GB single file | 652 s | ~21.4 GB on 1 card | n/a, different runtime | 109.4 (69.6) |
 
 Reading this:
 
-- FP8 does what it advertises — **~26 % less per-rank memory**, essentially free
-  in wall time.
-- **Precision is not what breaks the vLLM-Omni picture.** BF16 there is just as
-  bad as FP8 (43.0 vs 40.8 mean).
-- **INT8 ConvRot has no diffusers or vLLM-Omni equivalent.** Diffusers can only
-  do BF16 here: `torchao`/`bitsandbytes`/`quanto`/`sdnq` are all absent, GGUF has
-  no H3 file, and diffusers' `AutoRoundQuantizer` refuses on-the-fly quantization
+- FP8 is the better choice: **~27 % less per-rank memory, 7–11 % faster**, and
+  visually indistinguishable from BF16 at the same schedule.
+- All four runtimes now agree on quality once configured correctly (109–121 mean).
+- INT8 ConvRot has no diffusers or vLLM-Omni equivalent. Diffusers can only do
+  BF16 here: `torchao`/`bitsandbytes`/`quanto`/`sdnq` are all absent, GGUF has no
+  H3 file, and diffusers' `AutoRoundQuantizer` refuses on-the-fly quantization
   (`requires_calibration = True`). The harness supports `int8_convrot` when the
-  checkpoint's `config.json` declares it — ours does not (it is the full BF16
-  release), so INT8 stays ComfyUI-only.
-- **Two independent runtimes produce correct video at BF16-with-offload**
-  (diffusers 121.2, ComfyUI 109.4) while vLLM-Omni's BF16 produces 43.0. The
-  difference is the runtime, not the precision or the weights.
+  checkpoint's `config.json` declares it — ours does not (full BF16 release), so
+  INT8 stays ComfyUI-only.
 
 ## Step comparison
 
@@ -150,30 +151,48 @@ LoRA is loaded.
 | path | usable output? | evidence |
 |---|---|---|
 | ComfyUI 0.39 / 0.42, INT8 ConvRot, 8 steps | **yes** | correct village-road clip; frame std 69.6; bit-identical across versions |
-| diffusers 0.41, BF16, layer-streamed, 1 card | **yes** | correct village-road clip; frame mean 121.2, std 65.7 |
-| vLLM-Omni, FP8 or BF16, 9 steps | **no** | dark blurred crop of the reference image; frame std 28.7–32.9; identical across precision and attention backend |
-| vLLM-Omni, 2 steps, no LoRA | **no** | blurry smear, no scene structure |
+| vLLM-Omni, FP8 or BF16, **8 steps with the turbo LoRA activated in the request** | **yes** | corrected: frame mean 114.6, std 68.6 |
+| vLLM-Omni, base model, 50 steps, `flow_shift=12` | **yes** | frame mean 71.8, std 71.8 (dimmer grade, correct structure) |
+| diffusers 0.41, BF16, layer-streamed, 1 card | **yes** | frame mean 121.2, std 65.7 |
+| vLLM-Omni, **8–9 steps without the adapter actually bound** | **no** | dark blurred crop; frame mean ~41, std ~30 |
 
-**The fault is in vLLM-Omni's XPU diffusion execution path, not in the hardware,
-the weights, or the precision.** Two independent implementations running BF16
-with layer/layerwise offload on the same card and the same checkpoint produce a
-correct shot; vLLM-Omni does not.
+### Correction: vLLM-Omni is not broken
 
-Isolation performed on vLLM-Omni (all negative): precision (FP8 vs BF16),
-attention backend (FLASH_ATTN vs TORCH_SDPA), LoRA and step schedule (9-step vs
-2-step no-LoRA), VRAM (18.7 of 23.9 GiB peak), and start-up (healthy, 70–120 s).
-No MiniMax-H3 recipe upstream covers XPU (CUDA and NPU only), which is consistent
-with `platforms/xpu` providing its own diffusion attention backend.
+An earlier version of this document concluded that vLLM-Omni's XPU diffusion path was at
+fault. That was wrong, and the error was in the harness, not in vLLM-Omni.
+
+`--lora-path` on the server only **preloads** an adapter. Activation is per request, through
+the request's own `lora` field:
+
+```bash
+-F 'lora={"name":"h3-8step","path":"/abs/path/minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors"}'
+```
+
+Without that field every request silently ran the **base model** — but with the turbo
+schedule (8 steps, `flow_shift=6`), which is far too few steps for the undistilled model.
+Dark, blurred video was the expected result. That is why precision, attention backend, and
+2-vs-9 steps all appeared to make no difference: none of them was the variable.
+
+Two facts that would have caught it earlier:
+
+- No `DiffusionLoRAManager` / `FastH3 adapter active` line appears in the server log unless
+  an adapter is actually bound.
+- The artifact also enforces its own step count: `num_inference_steps` must equal the
+  artifact's `denoise_steps` (8 for the 8-step file). The recipe table's "9 sigma points"
+  is the implementation's 8 evaluations.
+
+`vllm-omni-run.sh` now sends the `lora` field on every request, uses 8 steps, and raises
+`VLLM_OMNI_DLO_DP_WAVE_TIMEOUT` so runs longer than 600 s do not die with
+`RPC call to execute_model timed out`.
 
 ### Operational hazard found the hard way
 
 Loading the whole 135 GiB partition across 16 cards at once with
-`device_map="balanced"` **wedged three GPUs** (`xe ... device wedged, needs
-recovery`, GuC queue timeouts) and left the stack unusable until a reboot. That
-matches the delivery manifest's `UR_RESULT_ERROR_DEVICE_LOST` warning for
-concurrent ~20 GB loads. Streaming one block at a time on a single card (the
-diffusers path above) peaked at 17.6 GiB with no driver events at all — prefer
-that shape.
+`device_map="balanced"` **wedged three GPUs** (`xe ... device wedged, needs recovery`, GuC
+queue timeouts) and left the stack unusable until a reboot. That matches the delivery
+manifest's `UR_RESULT_ERROR_DEVICE_LOST` warning for concurrent ~20 GB loads. Streaming one
+block at a time on a single card (the diffusers path above) peaked at 17.6 GiB with no driver
+events at all — prefer that shape.
 
 ## Reproduce
 
@@ -189,7 +208,7 @@ H3_RUNS_ROOT=/home/lm/work/paul/uv_scaffolding_xpu/diffusers-output/runs \
     --config-dir /home/lm/work/paul/uv_scaffolding_xpu/diffusers-output/cfg \
     shot01-diffusers xpu all --ops official
 
-# vLLM-Omni (broken path) — ~8 min on two cards
+# vLLM-Omni — ~6 min on two cards (adapter sent in the request)
 ./vllm-omni-run.sh run --gpus 2 --precision fp8 --lora 8step
 ./vllm-omni-run.sh run --gpus 2 --precision bf16 --lora 8step
 ./vllm-omni-run.sh run --profile smoke            # 2 steps, no LoRA
@@ -204,13 +223,12 @@ lands around mean 100–120 / std 65–75, a flat or dark failure well below tha
 
 ## Not measured
 
-- **vLLM-Omni step sweep** at a fixed shape (2 / 4 / 9 steps) — needed for a real
-  per-step slope.
+- **vLLM-Omni step sweep** with the adapter bound at a fixed shape (4 / 8 / 16) —
+  only 8 steps is mandated by the artifact, so the useful sweep is base-model
+  steps at `flow_shift=12` (e.g. 20 / 35 / 50).
 - **`--dlo-resident-layers` 16–20 at FP8** — the most promising latency knob,
   given ~9 GiB/rank sits unused.
 - **`fl2va` / T2VA** — the other 135 GiB partition is on disk but never served.
-- **Single-GPU FP8 without DLO** — would remove both sharding and offload from
-  the picture, separating "TP is wrong" from "offload staging is wrong".
 - **ComfyUI at other step counts** — only the 8-step turbo LoRA is available;
   the 4-step artifact was not fetched.
-- **Concurrent requests** — both runtimes served one request at a time.
+- **Concurrent requests** — all runtimes served one request at a time.

@@ -13,7 +13,7 @@
 #   ./vllm-omni-run.sh download --task ref2va
 #   ./vllm-omni-run.sh serve --gpus 2 --precision fp8 --task ref2va
 #   ./vllm-omni-run.sh generate --prompt "a fox in the snow" --image h3_input/assets/03-村口-实景.png
-#   ./vllm-omni-run.sh run --gpus 2 --precision fp8 --lora 8step --steps 9
+#   ./vllm-omni-run.sh run --gpus 2 --precision fp8 --lora 8step
 #   ./vllm-omni-run.sh run --profile smoke          # 1024x576, 2 steps, ~2 min
 #
 # WARNING (2026-10-22): on XPU the engine serves correctly and returns a
@@ -103,8 +103,8 @@ lora_file() {
 
 lora_schedule() {
     case "$LORA" in
-        8step) echo "9 6" ;;   # 8 forwards -> 9 sigma points, flow_shift 6
-        4step) echo "5 6" ;;   # 4 forwards -> 5 sigma points, flow_shift 6
+        8step) echo "8 6" ;;   # artifact spec: 8 denoise steps, video flow_shift 6
+        4step) echo "4 6" ;;   # artifact spec: 4 denoise steps, video flow_shift 6
         none)  echo "50 12" ;;
     esac
 }
@@ -203,10 +203,16 @@ cmd_serve() {
     [ "$DLO" -eq 1 ] && srv_args+=(--enable-distributed-layerwise-offload --dlo-no-use-allgather \
                                     --dlo-resident-layers "$RESIDENT_LAYERS")
     [ -n "$ATTN" ] && srv_args+=(--diffusion-attention-backend "$ATTN")
-    [ -n "$lora_path" ] && srv_args+=(--lora-backend peft --lora-path "$lora_path")
+    # NOTE: the adapter is NOT passed here. vLLM-Omni activates LoRA per
+    # request from the request's `lora` field; a server-side --lora-path only
+    # preloads it and, on its own, leaves every request running the base model.
+    # cmd_generate always sends that field.
 
     export VLLM_WORKER_MULTIPROC_METHOD=spawn
     export VLLM_OMNI_VIDEO_SYNC_TIMEOUT="${VLLM_OMNI_VIDEO_SYNC_TIMEOUT:-14400}"
+    # One execute_model RPC must cover the whole request; the 600 s default is
+    # short for a 50-step base-model run (~15 min).
+    export VLLM_OMNI_DLO_DP_WAVE_TIMEOUT="${VLLM_OMNI_DLO_DP_WAVE_TIMEOUT:-7200}"
     export ZE_AFFINITY_MASK="$gpu_ids"
 
     say "starting: $TASK on GPU $gpu_ids, precision=$PRECISION, DLO=$DLO/$RESIDENT_LAYERS layers, lora=$LORA"
@@ -226,9 +232,15 @@ cmd_generate() {
     server_pid >/dev/null || die "no server running; start one with '$0 serve' or use '$0 run'"
     [ -f "$IMAGE" ] || warn "reference image not found: $IMAGE (ref2va needs --image)"
 
-    local steps="${STEPS:-9}" flow="${FLOW_SHIFT:-6}"
+    local steps="${STEPS:-8}" flow="${FLOW_SHIFT:-6}"
     OUT_FILE="${OUT_FILE:-$OUT_DIR/${TASK}_${PRECISION}_${WIDTH}x${HEIGHT}_${steps}step.mp4}"
     mkdir -p "$(dirname "$OUT_FILE")"
+
+    local adapter=""
+    if [ "$LORA" != "none" ]; then
+        adapter="$LORA_DIR/$(lora_file)"
+        [ -f "$adapter" ] || die "LoRA missing: $adapter (run: $0 download --task $TASK)"
+    fi
 
     local form=(
         -F "prompt=$PROMPT"
@@ -236,6 +248,12 @@ cmd_generate() {
         -F "num_inference_steps=$steps" -F "flow_shift=$flow" -F "seed=$SEED"
         -F "extra_params={\"task\":\"$TASK\",\"duration\":$DURATION,\"audio_flow_shift\":3.0}"
     )
+    # Activate the turbo adapter for THIS request. Without this field the server
+    # silently runs the base model, which at 8 steps and flow_shift 6 produces a
+    # dark, blurred clip (that is the trap that cost several runs).
+    if [ -n "$adapter" ]; then
+        form+=(-F "lora={\"name\":\"h3-${LORA}\",\"path\":\"${adapter}\"}")
+    fi
     if [ "$TASK" = "ref2va" ] && [ -f "$IMAGE" ]; then
         form+=(-F "input_reference=@$IMAGE;type=image/png")
     elif [ "$TASK" = "fl2va" ]; then
