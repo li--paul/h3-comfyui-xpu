@@ -24,6 +24,34 @@ precision and step-count effects.
 | frames | 124 @ 24 fps (≈5.17 s) |
 | audio | 32 kHz stereo AAC, produced by both runtimes |
 
+## Summary: what each runtime actually loaded
+
+One row per runtime, measured on the same box, prompt, reference image and seed:
+
+| runtime | weights loaded | quantization | GPUs | VRAM/card | GPU freq% | power mean/peak | output |
+|---|---|---|---|---:|---:|---:|---|
+| ComfyUI 0.42 | `minimax_h3_ref2va_pruned_int8_convrot` (21 GB) + `qwen3vl_32b_..._int8_convrot` (27 GB) | **INT8 + ConvRot**, pre-quantized single-file (ComfyUI format) | 1 | 21.4 GB | 97.1 % | 139 / 164 W | **usable** |
+| diffusers 0.41 | full BF16 release, root modular layout (`transformer_ref` 62 GB + `text_encoder` 63 GB) | **BF16**, no quantization | 1 | 17.6 GiB | 97.2 % | 127 / 160 W | **usable** |
+| vLLM-Omni 0.32 | `Ref2VA/` partition, BF16 on disk (62 GB DiT + 63 GB encoder) | **FP8 online** on DiT + text-decoder linears; vision tower, VAEs and norms stay BF16 | 2 (TP2) | 14.7 GiB/rank | 87.5 / 90.2 % | 128 / 178 W per card | **usable** |
+
+Idle draw on these cards is **34 W**. Means include the model-load phase, not just denoising.
+
+How to read the utilization columns:
+
+- **GPU freq% is a weak signal.** The `gtidle` idle-residency counter is frozen on this host, so
+  `gpu_monitor.py` falls back to `cur_freq` against its min/max window. It reads ~97 % for any
+  card that is clocked up, and cannot distinguish real EU occupancy from waiting on memory.
+- **Power is the discriminating metric.** ComfyUI sustains the highest average draw (139 W on one
+  card), diffusers 127 W on one card, and vLLM-Omni 128/125 W on each of two cards. Diffusers and
+  vLLM-Omni both stream weights over PCIe every step (layer streaming / DLO), so part of each
+  step is spent transferring rather than computing; that is consistent with their lower average
+  draw despite higher peak (178 W) on the vLLM-Omni cards.
+- Neither proxy is a hardware counter. `xpu-smi` cannot read telemetry on this host, so true EU
+  utilization is **not measured** — treat these as activity indicators, not utilisation figures.
+
+Extra configurations measured without power sampling: vLLM-Omni BF16 uses 18.7 GiB/rank (vs
+14.7 for FP8) at 375 s vs 338–349 s, and the base model at 50 steps uses 12.4 GiB/rank.
+
 ## ComfyUI
 
 Single card, INT8 + ConvRot single-file checkpoints (DiT 20.97 GB, text encoder
