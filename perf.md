@@ -48,19 +48,31 @@ model resident at a time.
 Two cards, TP2 + distributed layerwise offload (12 resident DiT layers) + tiled
 VAE patch-parallel 2. Server start-up 70–120 s, excluded from the numbers below.
 
-| # | precision | attention | LoRA in request | steps | flow shift | shape | E2E | peak/rank | frame mean (std) | verdict |
-|---|---|---|---|---|---:|---:|---|---:|---:|---|---|
-| 1 | FP8 online | FLASH_ATTN | **yes** | 8 | 6 | 1376×768 | 338–349 s | 14.7 GiB | **114.6 (68.4)** | **correct** |
-| 2 | BF16 | FLASH_ATTN | **yes** | 8 | 6 | 1376×768 | 375 s | 18.7 GiB | **114.7 (68.9)** | **correct** |
-| 3 | FP8 online | FLASH_ATTN | none, base model | 50 | 12 | 1024×576 | 943 s | 12.4 GiB | 71.8 (71.8) | correct |
-| 4 | FP8 online | FLASH_ATTN | *not bound* | 9 | 6 | 1376×768 | 360–370 s | 14.8 GiB | 40.8 (28.7) | under-denoised |
-| 5 | BF16 | FLASH_ATTN | *not bound* | 9 | 6 | 1376×768 | 371 s | 18.7 GiB | 43.0 (32.9) | under-denoised |
-| 6 | BF16 | TORCH_SDPA | *not bound* | 9 | 6 | 1376×768 | 450 s | 18.4 GiB | 43.4 (32.6) | under-denoised |
-| 7 | FP8 online | FLASH_ATTN | none | 2 | 12 | 1024×576 | 78–98 s | 12.8 GiB | 71.7 (70.5) | under-denoised |
+### Valid configurations
 
-Rows 1–3 are the valid configurations. Rows 4–7 are kept because they document a harness
-mistake rather than a runtime property: rows 4–6 ran the **base model** on the turbo
-schedule, and row 7 is simply 2 steps of anything.
+| # | precision | LoRA in request | steps | flow | shape | E2E | peak/rank | mean (std) |
+|---|---|---|---:|---:|---:|---:|---:|---|
+| 1 | FP8 online | **yes** | 8 | 6 | 1376x768 | 338-349 s | 14.7 GiB | **114.6 (68.4)** |
+| 2 | BF16 | **yes** | 8 | 6 | 1376x768 | 375 s | 18.7 GiB | **114.7 (68.9)** |
+| 3 | FP8 online | none (base model) | 50 | 12 | 1024x576 | 943 s | 12.4 GiB | 71.8 (71.8) |
+
+All three produce correct output. Rows 1-2 use the turbo adapter and its mandated
+schedule; row 3 is the undistilled base model on its own schedule, so it needs about
+six times the steps and comes out dimmer but structurally right.
+
+### Harness-bug rows (adapter never bound)
+
+| # | precision | attention | steps | flow | shape | E2E | peak/rank | mean (std) |
+|---|---|---|---:|---:|---:|---:|---:|---|
+| 4 | FP8 online | FLASH_ATTN | 9 | 6 | 1376x768 | 360-370 s | 14.8 GiB | 40.8 (28.7) |
+| 5 | BF16 | FLASH_ATTN | 9 | 6 | 1376x768 | 371 s | 18.7 GiB | 43.0 (32.9) |
+| 6 | BF16 | TORCH_SDPA | 9 | 6 | 1376x768 | 450 s | 18.4 GiB | 43.4 (32.6) |
+| 7 | FP8 online | FLASH_ATTN | 2 | 12 | 1024x576 | 78-98 s | 12.8 GiB | 71.7 (70.5) |
+
+Rows 4-6 ran the **base model on the turbo schedule** (the adapter was requested
+but never activated), and row 7 is simply 2 steps of anything. All four are
+under-denoised rather than broken; they are kept because "dark and blurry" is the
+signature worth recognising.
 
 Every request returned HTTP 200 with a well-formed 124-frame H.264 mp4 carrying
 32 kHz stereo AAC. No `DEVICE_LOST`, no xe/GuC faults, no OOM.
