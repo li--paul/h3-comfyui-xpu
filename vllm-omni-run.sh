@@ -14,14 +14,16 @@
 #   ./vllm-omni-run.sh serve --gpus 2 --precision fp8 --task ref2va
 #   ./vllm-omni-run.sh generate --prompt "a fox in the snow" --image h3_input/assets/03-村口-实景.png
 #   ./vllm-omni-run.sh run --gpus 2 --precision fp8 --lora 8step
-#   ./vllm-omni-run.sh run --profile smoke          # 1024x576, 2 steps, ~2 min
+#   ./vllm-omni-run.sh run --profile smoke          # 1024x576, 2 steps, ~2 min (deliberately under-denoised)
 #
-# WARNING (2026-10-22): on XPU the engine serves correctly and returns a
-# well-formed mp4 with audio, but the picture is degenerate -- dark/blurred. This
-# is not a precision, attention-backend or LoRA problem (all three were isolated);
-# it looks like the XPU diffusion path itself. ComfyUI remains the working H3
-# path; see AGENTS.md. This script exists to make that reproducible and to test
-# future fixes quickly.
+# NOTE (retraction, 2026-10-24): an earlier version of this header claimed the XPU
+# diffusion path itself produced dark/blurred video. That was wrong. The adapter
+# was never activated -- it must be named in each request's `lora` field, and a
+# server-side --lora-path alone is deactivated again by the next request that omits
+# it -- so the base model ran the turbo schedule. With the adapter bound (cmd_generate
+# always binds it) the output is correct; see perf.md rows 1-2. Dark/blurred remains
+# the signature to recognise when a run silently falls back to the base model
+# (perf.md rows 4-6), but it is a harness bug, not a runtime fault.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +43,7 @@ ATTN=""
 RESIDENT_LAYERS=12
 DLO=1
 LORA="8step"
+PROFILE=""
 PROMPT="An empty village road in the low morning sun before anyone comes. Photorealistic live-action film look, natural daylight."
 IMAGE="$ROOT/h3_input/assets/03-村口-实景.png"
 WIDTH=1376
@@ -178,6 +181,10 @@ cmd_serve() {
         STEPS="$want_steps"; FLOW_SHIFT="$want_flow"
     else
         STEPS="${STEPS:-50}"; FLOW_SHIFT="${FLOW_SHIFT:-12}"
+    fi
+
+    if [ "$PROFILE" = "smoke" ]; then
+        warn "profile smoke: $STEPS steps with no adapter -- the clip is deliberately under-denoised"
     fi
 
     mkdir -p "$OUT_DIR"
@@ -354,8 +361,8 @@ while [ $# -gt 0 ]; do
             case "$2" in
                 # smoke disables the LoRA so a 2-step request is actually legal:
                 # the LoRA artifacts forbid anything but their own schedule.
-                smoke) WIDTH=1024; HEIGHT=576; STEPS=2; FLOW_SHIFT=12; LORA=none ;;
-                quality) WIDTH=1376; HEIGHT=768 ;;
+                smoke) WIDTH=1024; HEIGHT=576; STEPS=2; FLOW_SHIFT=12; LORA=none; PROFILE=smoke ;;
+                quality) WIDTH=1376; HEIGHT=768; PROFILE=quality ;;
                 *) die "unknown profile '$2' (smoke|quality)" ;;
             esac
             shift 2 ;;
@@ -367,6 +374,16 @@ case "$TASK" in ref2va|fl2va) ;; *) die "--task must be ref2va or fl2va" ;; esac
 case "$PRECISION" in fp8|bf16) ;; *) die "--precision must be fp8 or bf16" ;; esac
 case "$LORA" in 8step|4step|none) ;; *) die "--lora must be 8step, 4step or none" ;; esac
 [ "$GPU_COUNT" -ge 1 ] || die "--gpus must be >= 1"
+
+# The base model needs ~50 steps; on a turbo-length schedule it produces the same
+# dark/blurred clip as an unbound adapter, which is indistinguishable from the bug
+# this script exists to avoid. Only --profile smoke may under-denoise on purpose.
+if [ "$LORA" = "none" ] && [ "$PROFILE" != "smoke" ]; then
+    requested_steps="${STEPS:-50}"
+    if [[ "$requested_steps" =~ ^[0-9]+$ ]] && [ "$requested_steps" -lt 20 ]; then
+        die "--lora none with --steps $requested_steps under-denoises (the base model needs ~50 steps, flow_shift=12)."$'\n'"      Use --lora 8step for a short run, or --profile smoke if you only want a plumbing check."
+    fi
+fi
 
 mkdir -p "$OUT_DIR"
 

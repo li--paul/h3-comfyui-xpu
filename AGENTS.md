@@ -172,21 +172,20 @@ many cards at once), not a package bug.
 
 Driver: `./vllm-omni-run.sh` (`download` / `serve` / `generate` / `run` / `stop` / `status`).
 It handles the partition + LoRA download, TP/DLO sizing, the LoRA's mandatory
-steps/flow_shift, and writes to `vllm-omni-output/`. Full measurement tables
-(runtime × precision × steps, memory, quality, gaps) are in `perf.md`.
-
-### MiniMax-H3 on vLLM-Omni
-
-Working, after one important correction: **`--lora-path` only preloads an adapter; it must be
-named in each request** via `-F 'lora={"name":…,"path":…}'`. Without that field the server runs
-the base model, and 8 steps with the turbo schedule produces a dark blurred clip — which an
-earlier version of this file wrongly attributed to vLLM-Omni's XPU path.
-
-Driver: `./vllm-omni-run.sh` (`download` / `serve` / `generate` / `run` / `stop` / `status`).
-It sends the `lora` field, pins the artifact's mandatory step count
-(`num_inference_steps=8` for the 8-step file), and raises
+steps/flow_shift, writes to `vllm-omni-output/`, and raises
 `VLLM_OMNI_DLO_DP_WAVE_TIMEOUT` so runs over 600 s don't die with
-`RPC call to execute_model timed out`. Full tables in `perf.md`.
+`RPC call to execute_model timed out`. Full measurement tables (runtime × precision ×
+steps, memory, quality, gaps) are in `perf.md`.
+
+**`--lora-path` only preloads an adapter; the adapter must be named in every request** via
+`-F 'lora={"name":…,"path":…}'`. `set_request_adapter` runs on each request and
+`set_active_adapter(None)` deactivates whatever was loaded, so a server-side `--lora-path` alone
+serves the base model. MiniMax-H3 does not set `diffusion_lora_fixed_adapter` (only TaoMate-H3
+does), so there is no sticky mode, and `--lora-backend distill` is unavailable because the H3
+pipeline has no `load_lora_weights`. The request field is also what triggers
+`_validate_turbo_sampling`, so omitting it silently drops the artifact's 8-step / `flow_shift=6`
+contract as well. Without the field, 8 steps on the turbo schedule produces a dark blurred clip —
+which an earlier version of this file wrongly attributed to vLLM-Omni's XPU path.
 
 Measured on 2× Arc Pro B60, Ref2VA 135 GiB partition at `~/work/models/MiniMax-H3/Ref2VA`,
 TP2 + DLO (12 resident layers) + tiled VAE, turbo LoRA
@@ -223,6 +222,10 @@ lists), and `_comfyui_` LoRA exports are refused by name.
   cards all three cannot share one device, and a global `--gpu-memory-utilization` overrides every
   per-stage value — use `--deploy-config deploy/qwen2_5_omni_2xb60.yaml` instead of CLI memory flags.
 - No native int4 matmul (`torch.quint4x2`); emulate 4-bit GEMM as two int8 GEMMs.
+- ComfyUI runs **no** native quantized kernels on XPU (`supports_int8_compute()` hardcodes `False`
+  for `is_intel_xpu()`), so the `int8_convrot` checkpoints are storage-only: every linear
+  dequantizes to BF16/FP16 per forward and the GEMM is BF16. `torch._int_mm` does work on XPU, so
+  this is a ComfyUI policy choice, not a missing operator — see `perf.md`.
 - SDPA on XPU must avoid the cuDNN backend (`CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH`); MATH works.
 - TP=8 heavy allreduce can permanently drop a PCIe root port to Gen1 and only a power cycle
   recovers it — see `vllm_tp8_pcie_downgrade.md`.

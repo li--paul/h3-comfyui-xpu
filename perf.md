@@ -57,6 +57,21 @@ Extra configurations measured without power sampling: vLLM-Omni BF16 uses 18.7 G
 Single card, INT8 + ConvRot single-file checkpoints (DiT 20.97 GB, text encoder
 27.14 GB), 8-step turbo LoRA, `res_multistep` / `beta`, CFG 1.0.
 
+**On XPU, INT8 is a storage format only — the matmul runs in BF16.** `comfy_kitchen`
+reports no native quantized kernels on Intel XPU (`comfy/model_management.py:2101`
+hardcodes `supports_int8_compute() -> False` for `is_intel_xpu()`, so
+`get_disabled_quant_formats()` disables every format and `comfy/ops.py:1253` sets
+`_full_precision_mm = True` per layer). Each forward therefore dequantizes the
+weight — `q.float() * scale`, then the ConvRot Hadamard is rotated back to the
+original basis — before a BF16 `F.linear`; VAE and text encoder run FP16
+(`server.log`: `Native ops:  , emulated ops: ... int8_tensorwise ...`). The gain is
+21 GB instead of ~42 GB of weights and half the per-step PCIe/disk traffic under
+`fast_disk=True` layer streaming; there is **no** compute gain, and the dequant is
+recomputed every step. Note `torch._int_mm` does work on XPU (verified: int8
+matmul → int32, correct), so this is a conservative policy in ComfyUI, not a
+missing operator. This is not comparable to vLLM-Omni's `--quantization fp8`,
+which is a real FP8 inference path.
+
 | # | ComfyUI | quant | steps | shape | sampling | wall | peak VRAM | frame mean (std) | verdict |
 |---|---|---|---:|---|---:|---:|---:|---|---|
 | 1 | 0.39.0 (delivery package) | INT8 ConvRot | 8 | 1376×768 | 70.1 s/step | ~660 s | ~21.4 GB | 109.4 (69.6) | **correct** |
