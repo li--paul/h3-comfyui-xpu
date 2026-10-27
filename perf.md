@@ -124,6 +124,66 @@ Every request returned HTTP 200 with a well-formed 124-frame H.264 mp4 carrying
 > base model on the turbo schedule, not a container or audio failure — see the correction
 > below.
 
+## Sparse attention (SOL) on XPU
+
+Measured 2026-10-27. Sparse attention needs `omni_xpu_kernel` plus a Kitchen build with an
+`xpu` backend; the stock ComfyUI install in `.venv` has neither, so it cannot run there at
+all (three CUDA-hardcoded gates: `nodes_sparse_attention.py:156`/`:232` test
+`device.type != "cuda"`, and `comfy_kitchen.sol_attn_is_available()` returns False for any
+non-CUDA device; the eager reference is also unusable — it materialises scores densely,
+O(T²), and hard-errors past 4 GiB, while our sequence is 41,042 rows). Use Intel's published
+image instead.
+
+Environment: `intel/llm-scaler-omni:0.2.0-b2`, one Arc Pro B60 (24 GB, XPU 16), ComfyUI
+0.39.0, torch 2.14.0+xpu, `omni_xpu_kernel 0.2.0b2+torch214.bmg`, `comfy-kitchen 0.2.37` +
+`comfy-kitchen-xpu-runtime`, `ComfyUI-OmniXPU`. Providers activate from the node's
+`prestartup_script.apply_runtime_providers()` (before torch import); a bare
+`import comfy_kitchen` shows no `xpu` backend and looks like a failure when it is not.
+
+Workflow: our 6-node JZL graph with `BlockSparseAttention` inserted between the LoRA and
+`JZL_MiniMaxAssetManager` (the node's `model` input is optional, so it accepts the patched
+model). In the API JSON `selection` is a `COMFY_DYNAMICCOMBO_V3` and takes **flat** keys —
+`"selection": "sol-attn"` plus `"selection.tau": 1.3`; a nested dict silently drops the
+input and fails with `missing 1 required positional argument: 'selection'`.
+`sink_conditioning=exact_kv_and_rows` is the H3-specific mode that keeps packed
+text/audio/reference rows and the target-audio query rows dense.
+
+8-step turbo LoRA, 1376×768, 124 frames, seed 1001, 1.0 MP, `extra_tokens=256`,
+`min_tokens=12288` (sequence is 41,042 rows, so sparsity engages):
+
+| config | E2E | vs dense | frame mean | std | motion | PSNR vs dense |
+|---|---:|---:|---:|---:|---:|---:|
+| dense | 470.2 s | 1.00× | 109.3 | 69.7 | 11.47 | — |
+| SOL `tau=1.0`, start 0.2 | 410.2 s | 1.15× | 108.8 | 69.9 | 11.10 | 20.99 dB |
+| SOL `tau=1.3`, start 0.2 | 410.4 s | 1.15× | 109.2 | 69.9 | 11.18 | 19.88 dB |
+| SOL `tau=2.0`, start 0.2 | 390.2 s | 1.21× | 109.2 | 69.8 | 11.15 | 18.26 dB |
+| SOL `tau=1.3`, **start 0.0** | **370.2 s** | **1.27×** | 108.4 | 70.1 | 11.50 | 18.46 dB |
+
+Sparse engages only after `start_percent`: the first three steps (sigma 1 / 0.995 / 0.983)
+stay dense at ~46.2 s, later steps run at ~38 s, i.e. **~1.22× on the sparse steps**;
+`start_percent=0.0` is what lifts E2E to 1.27×. `verbose=true` is the only reliable check —
+it prints `sparse producer path: 41042 tokens, sinks (0, 45)/(38, 45)` when routing is live
+and `dense (41042 tokens): sigma … outside the start/end window` otherwise. Note
+`sol_attn_chunked` is **absent** from this image's Kitchen yet the H3 producer path still
+runs, so that capability name is not a usable readiness check.
+
+Quality: every variant is a different sampling trajectory (0/124 frames identical,
+18–21 dB PSNR) but the same shot — identical composition, mean/std within 1%, no visible
+artefacts even at `tau=2.0`. Judge it on the clip, not on PSNR.
+
+**The image is faster than our own venv even without sparsity**: dense 46.4 s/step /
+470.2 s versus 70.1 s/step / 652 s in `.venv` at identical frame statistics
+(109.3/69.7 vs 109.4/69.6), from native INT8 GEMM plus the CUTE attention adapter. Single
+card here versus vLLM-Omni's TP2 — one-card ComfyUI with sparsity matches two-card
+vLLM-Omni per step (40.5 vs 40.1 s) at 410 vs 375 s E2E.
+
+vLLM-Omni has **no** Sol/SLA backend at all: `DiffusionAttentionBackendEnum` lists only
+FLASH_ATTN, TORCH_SDPA, SAGE_ATTN(_3), CUDNN_ATTN, FLASHINFER_ATTN, FASTVIDEO_VSA,
+VDNH3_ATTN, FLASH_ATTN_HUB(_3), TRTLLM_ATTN and RAINFUSION_ATTN, and the one sparse entry
+falls back to dense on XPU — `fastvideo_vsa.py:437` `forward_xpu()` returns
+`self.sdpa_fallback.forward_xpu(...)`, with `validate_available()` demanding CUDA-only
+`fastvideo_kernel`/`flashinfer`.
+
 ## diffusers
 
 Single card, BF16, **root modular layout** (`~/work/models/MiniMax-H3`, not the

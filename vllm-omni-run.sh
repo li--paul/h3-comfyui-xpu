@@ -14,6 +14,7 @@
 #   ./vllm-omni-run.sh serve --gpus 2 --precision fp8 --task ref2va
 #   ./vllm-omni-run.sh generate --prompt "a fox in the snow" --image h3_input/assets/03-村口-实景.png
 #   ./vllm-omni-run.sh run --gpus 2 --precision fp8 --lora 8step
+#   ./vllm-omni-run.sh run --gpu-ids 30,31 --precision bf16 --lora none --steps 20
 #   ./vllm-omni-run.sh run --profile smoke          # 1024x576, 2 steps, ~2 min (deliberately under-denoised)
 #
 # NOTE (retraction, 2026-10-24): an earlier version of this header claimed the XPU
@@ -37,6 +38,7 @@ BASE="http://127.0.0.1:$PORT"
 
 # --- defaults (each is a flag below) ---------------------------------------
 GPU_COUNT=2
+GPU_IDS=""          # explicit device list, e.g. 30,31 or 30:31; overrides the 0..N-1 default
 PRECISION="fp8"
 TASK="ref2va"
 ATTN=""
@@ -52,6 +54,8 @@ FPS=24
 DURATION=5
 STEPS=""
 FLOW_SHIFT=""
+SAMPLER=""          # euler (server default) | res_multistep; sent only when set
+QUALITY=""          # lossless (server default) | high (Cache-DiT); sent only when set
 SEED=1001
 OUT_FILE=""
 KEEP_SERVER=0
@@ -83,11 +87,36 @@ server_pid() {
 wait_health() {
     local pid="$1" timeout="${2:-600}" i
     for ((i = 0; i < timeout; i += 5)); do
-        if curl -sf "$BASE/health" >/dev/null 2>&1; then return 0; fi
+        # Check liveness BEFORE the probe: another tenant's server can already be
+        # listening on this port, in which case /health answers while ours is dead
+        # (bind failed) and every later request silently goes to the wrong engine.
         kill -0 "$pid" 2>/dev/null || return 1
+        if curl -sf "$BASE/health" >/dev/null 2>&1; then return 0; fi
         sleep 5
     done
     return 1
+}
+
+# True when something already accepts connections on this port.
+port_in_use() {
+    if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+# --gpu-ids accepts "30,31", "30:31" or "30-31" (a bare range expands). The
+# script otherwise assumes devices 0..N-1, which is wrong on a 32-XPU box where
+# other tenants hold the low ids.
+normalize_gpu_ids() {
+    local spec="${1//：/:}"
+    if [[ "$spec" =~ ^([0-9]+)[:\-]([0-9]+)$ ]]; then
+        local a="${BASH_REMATCH[1]}" b="${BASH_REMATCH[2]}"
+        [ "$a" -le "$b" ] || die "--gpu-ids range must be ascending (got '$1')"
+        seq -s, "$a" "$b"
+    else
+        echo "$spec"
+    fi
 }
 
 # LoRA artifacts are validated by filename, and each mandates its own schedule.
@@ -188,7 +217,24 @@ cmd_serve() {
     fi
 
     mkdir -p "$OUT_DIR"
-    local gpu_ids; gpu_ids="$(seq -s, 0 $((GPU_COUNT - 1)))"
+    local gpu_ids
+    if [ -n "$GPU_IDS" ]; then
+        gpu_ids="$GPU_IDS"
+        GPU_COUNT="$(awk -F, '{print NF}' <<<"$gpu_ids")"
+        # Cards can vanish from the pool between runs (other tenants). Without this
+        # the engine dies deep inside worker init with a misleading
+        # "device index is out of range".
+        local avail
+        avail="$("$ROOT/.venv/bin/python" -c 'import torch; print(torch.xpu.device_count())' 2>/dev/null | tail -1)"
+        if [[ "$avail" =~ ^[0-9]+$ ]]; then
+            local id
+            for id in ${gpu_ids//,/ }; do
+                [ "$id" -lt "$avail" ] || die "device $id does not exist (torch.xpu.device_count()=$avail, valid ids 0..$((avail - 1)))"
+            done
+        fi
+    else
+        gpu_ids="$(seq -s, 0 $((GPU_COUNT - 1)))"
+    fi
 
     # oneAPI's setvars.sh assigns a global array named `args` (and resets
     # positional params), so it must run BEFORE we build the command array.
@@ -223,6 +269,9 @@ cmd_serve() {
     export ZE_AFFINITY_MASK="$gpu_ids"
 
     say "starting: $TASK on GPU $gpu_ids, precision=$PRECISION, DLO=$DLO/$RESIDENT_LAYERS layers, lora=$LORA"
+    if port_in_use; then
+        die "port $PORT already has a listener (another tenant's server?); refusing to start."$'\n'"      Ours would fail to bind while /health answered from theirs, and the request would go to the wrong engine."$'\n'"      Pick a free port with --port (e.g. --port 18090)."
+    fi
     nohup "$ROOT/.venv/bin/vllm" "${srv_args[@]}" > "$LOG" 2>&1 &
     echo $! > "$PIDFILE"
     say "pid $(cat "$PIDFILE"), log $LOG"
@@ -231,6 +280,9 @@ cmd_serve() {
         say "server ready on $BASE (steps=$STEPS flow_shift=$FLOW_SHIFT)"
     else
         tail -20 "$LOG" >&2
+        # A crashed engine can leave the parent alive (orchestrator shutdown hang),
+        # which would keep the pidfile occupied and block the next attempt.
+        cmd_stop || true
         die "server failed to become healthy; see $LOG"
     fi
 }
@@ -240,7 +292,12 @@ cmd_generate() {
     [ -f "$IMAGE" ] || warn "reference image not found: $IMAGE (ref2va needs --image)"
 
     local steps="${STEPS:-8}" flow="${FLOW_SHIFT:-6}"
-    OUT_FILE="${OUT_FILE:-$OUT_DIR/${TASK}_${PRECISION}_${WIDTH}x${HEIGHT}_${steps}step.mp4}"
+    # Non-default sampler/quality must appear in the name: two runs that differ only
+    # in sampler otherwise overwrite each other.
+    local tag=""
+    [ -n "$SAMPLER" ] && [ "$SAMPLER" != "euler" ] && tag+="_${SAMPLER}"
+    [ -n "$QUALITY" ] && [ "$QUALITY" != "lossless" ] && tag+="_${QUALITY}"
+    OUT_FILE="${OUT_FILE:-$OUT_DIR/${TASK}_${PRECISION}_${WIDTH}x${HEIGHT}_${steps}step${tag}.mp4}"
     mkdir -p "$(dirname "$OUT_FILE")"
 
     local adapter=""
@@ -249,11 +306,19 @@ cmd_generate() {
         [ -f "$adapter" ] || die "LoRA missing: $adapter (run: $0 download --task $TASK)"
     fi
 
+    # Request-scoped sampler/quality live in extra_params (see the vLLM-Omni
+    # recipe: 20 steps is only sanctioned together with sampler=res_multistep,
+    # and quality selects a Cache-DiT policy -- lossless is the reference path).
+    local extra="{\"task\":\"$TASK\",\"duration\":$DURATION,\"audio_flow_shift\":3.0"
+    [ -n "$SAMPLER" ] && extra+=",\"sampler\":\"$SAMPLER\""
+    [ -n "$QUALITY" ] && extra+=",\"quality\":\"$QUALITY\""
+    extra+="}"
+
     local form=(
         -F "prompt=$PROMPT"
         -F "width=$WIDTH" -F "height=$HEIGHT" -F "fps=$FPS"
         -F "num_inference_steps=$steps" -F "flow_shift=$flow" -F "seed=$SEED"
-        -F "extra_params={\"task\":\"$TASK\",\"duration\":$DURATION,\"audio_flow_shift\":3.0}"
+        -F "extra_params=$extra"
     )
     # Activate the turbo adapter for THIS request. Without this field the server
     # silently runs the base model, which at 8 steps and flow_shift 6 produces a
@@ -267,7 +332,7 @@ cmd_generate() {
         form+=(-F "aspect_ratio=16:9")
     fi
 
-    say "generating ${WIDTH}x${HEIGHT}, ${DURATION}s, $steps steps, seed $SEED"
+    say "generating ${WIDTH}x${HEIGHT}, ${DURATION}s, $steps steps, seed $SEED, sampler=${SAMPLER:-euler}${QUALITY:+, quality=$QUALITY}"
     local headers="$OUT_DIR/last_headers.txt"
     local rc=0
     curl -sS -D "$headers" -o "$OUT_FILE" --max-time "${GEN_TIMEOUT:-7200}" \
@@ -339,6 +404,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --help|-h) usage; exit 0 ;;
         --gpus) GPU_COUNT="$2"; shift 2 ;;
+        --gpu-ids) GPU_IDS="$(normalize_gpu_ids "$2")"; shift 2 ;;
         --precision) PRECISION="$2"; shift 2 ;;
         --task) TASK="$2"; shift 2 ;;
         --attn) ATTN="$2"; shift 2 ;;
@@ -353,6 +419,8 @@ while [ $# -gt 0 ]; do
         --duration) DURATION="$2"; shift 2 ;;
         --steps) STEPS="$2"; shift 2 ;;
         --flow-shift) FLOW_SHIFT="$2"; shift 2 ;;
+        --sampler) SAMPLER="$2"; shift 2 ;;
+        --quality) QUALITY="$2"; shift 2 ;;
         --seed) SEED="$2"; shift 2 ;;
         --out) OUT_FILE="$2"; shift 2 ;;
         --port) PORT="$2"; BASE="http://127.0.0.1:$PORT"; shift 2 ;;
@@ -373,7 +441,19 @@ done
 case "$TASK" in ref2va|fl2va) ;; *) die "--task must be ref2va or fl2va" ;; esac
 case "$PRECISION" in fp8|bf16) ;; *) die "--precision must be fp8 or bf16" ;; esac
 case "$LORA" in 8step|4step|none) ;; *) die "--lora must be 8step, 4step or none" ;; esac
+case "${SAMPLER:-euler}" in euler|res_multistep) ;; *) die "--sampler must be euler or res_multistep" ;; esac
+case "${QUALITY:-lossless}" in lossless|high) ;; *) die "--quality must be lossless or high" ;; esac
+# A fixed distilled base_schedule (every turbo adapter) is only validated with
+# Euler; the server rejects RES for it outright.
+if [ "$SAMPLER" = "res_multistep" ] && [ "$LORA" != "none" ]; then
+    die "--sampler res_multistep is rejected for turbo adapters (fixed distilled base_schedule requires euler)."$'\n'"      Use --lora none for a RES comparison run."
+fi
 [ "$GPU_COUNT" -ge 1 ] || die "--gpus must be >= 1"
+if [ -n "$GPU_IDS" ]; then
+    case "$GPU_IDS" in
+        *[!0-9,]*|,*|*,|*,,*) die "--gpu-ids must be a comma list or a range like 30:31 (got '$GPU_IDS')" ;;
+    esac
+fi
 
 # The base model needs ~50 steps; on a turbo-length schedule it produces the same
 # dark/blurred clip as an unbound adapter, which is indistinguishable from the bug

@@ -222,10 +222,13 @@ lists), and `_comfyui_` LoRA exports are refused by name.
   cards all three cannot share one device, and a global `--gpu-memory-utilization` overrides every
   per-stage value — use `--deploy-config deploy/qwen2_5_omni_2xb60.yaml` instead of CLI memory flags.
 - No native int4 matmul (`torch.quint4x2`); emulate 4-bit GEMM as two int8 GEMMs.
-- ComfyUI runs **no** native quantized kernels on XPU (`supports_int8_compute()` hardcodes `False`
-  for `is_intel_xpu()`), so the `int8_convrot` checkpoints are storage-only: every linear
-  dequantizes to BF16/FP16 per forward and the GEMM is BF16. `torch._int_mm` does work on XPU, so
-  this is a ComfyUI policy choice, not a missing operator — see `perf.md`.
+- ComfyUI's **stock install** runs no native quantized kernels on XPU (`supports_int8_compute()`
+  hardcodes `False` for `is_intel_xpu()`), so the `int8_convrot` checkpoints there are
+  storage-only: every linear dequantizes to BF16/FP16 per forward and the GEMM is BF16.
+  `torch._int_mm` does work on XPU, so that is a ComfyUI policy choice, not a missing operator.
+  Intel's `intel/llm-scaler-omni` image is different — it ships `omni_xpu_kernel` + a Kitchen
+  `xpu` backend with native `int8_linear`, and is 1.39× faster per step than `.venv` on the
+  same model. See `perf.md`.
 - SDPA on XPU must avoid the cuDNN backend (`CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH`); MATH works.
 - TP=8 heavy allreduce can permanently drop a PCIe root port to Gen1 and only a power cycle
   recovers it — see `vllm_tp8_pcie_downgrade.md`.
