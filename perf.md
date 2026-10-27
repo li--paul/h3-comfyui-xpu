@@ -184,6 +184,24 @@ falls back to dense on XPU — `fastvideo_vsa.py:437` `forward_xpu()` returns
 `self.sdpa_fallback.forward_xpu(...)`, with `validate_available()` demanding CUDA-only
 `fastvideo_kernel`/`flashinfer`.
 
+### Two cards: two instances, not tensor parallel
+
+ComfyUI has no TP, so the way to use a second card is a second instance. Two containers,
+one `renderD144` (XPU 16) and one `renderD145` (XPU 17), each exposing exactly one device
+(`Device: xpu:0` in both), each given the same SOL `tau=1.3` / `start_percent=0.0` job:
+
+| | solo | dual |
+|---|---:|---:|
+| wall clock | 370.2 s for 1 clip | **390 s for 2 clips** |
+| per job | 370.2 s | 380.3 s (XPU 16) / 390.2 s (XPU 17) |
+| throughput | 1.00× | **1.90×** |
+
+Each job slows by only 3–5% under concurrency, and both outputs are bit-identical to the
+solo run (same 9,096,609 B, mean 108.4 / std 70.1 / motion 11.50), so the instances do not
+interfere numerically. Two cards buy 1.9× throughput for 5% latency — far better than
+vLLM-Omni's TP2+DLO, which needs both cards to run a single request at roughly the same
+per-step cost as one card here.
+
 ## diffusers
 
 Single card, BF16, **root modular layout** (`~/work/models/MiniMax-H3`, not the
