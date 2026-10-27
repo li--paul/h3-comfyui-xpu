@@ -159,13 +159,16 @@ text/audio/reference rows and the target-audio query rows dense.
 | SOL `tau=2.0`, start 0.2 | 390.2 s | 1.21× | 109.2 | 69.8 | 11.15 | 18.26 dB |
 | SOL `tau=1.3`, **start 0.0** | **370.2 s** | **1.27×** | 108.4 | 70.1 | 11.50 | 18.46 dB |
 
-Sparse engages only after `start_percent`: the first three steps (sigma 1 / 0.995 / 0.983)
-stay dense at ~46.2 s, later steps run at ~38 s, i.e. **~1.22× on the sparse steps**;
-`start_percent=0.0` is what lifts E2E to 1.27×. `verbose=true` is the only reliable check —
-it prints `sparse producer path: 41042 tokens, sinks (0, 45)/(38, 45)` when routing is live
-and `dense (41042 tokens): sigma … outside the start/end window` otherwise. Note
-`sol_attn_chunked` is **absent** from this image's Kitchen yet the H3 producer path still
-runs, so that capability name is not a usable readiness check.
+Sparse engages only after `start_percent`: with the default `0.2` the first three steps
+(sigma 1 / 0.995 / 0.983) stay dense at ~46.2 s and the rest run at ~38 s, giving a measured
+40.53 s/it; `start_percent=0.0` runs all eight steps sparse at a measured **36.97 s/it**
+(4:55 sampling, 295 s) and is what lifts E2E to 1.20–1.27×. Identical configs vary by ~5%
+run to run (370.2 s versus 390.2 s for the same `start=0.0` job), so treat the E2E figure as
+a range and compare per-step numbers instead. `verbose=true` is the only reliable check — it
+prints `sparse producer path: 41042 tokens, sinks (0, 45)/(38, 45)` when routing is live
+(at `start=0.0` from the very first step) and `dense (41042 tokens): sigma … outside the
+start/end window` otherwise. Note `sol_attn_chunked` is **absent** from this image's Kitchen
+yet the H3 producer path still runs, so that capability name is not a usable readiness check.
 
 Quality: every variant is a different sampling trajectory (0/124 frames identical,
 18–21 dB PSNR) but the same shot — identical composition, mean/std within 1%, no visible
