@@ -229,6 +229,12 @@ lists), and `_comfyui_` LoRA exports are refused by name.
   Intel's `intel/llm-scaler-omni` image is different — it ships `omni_xpu_kernel` + a Kitchen
   `xpu` backend with native `int8_linear`, and is 1.39× faster per step than `.venv` on the
   same model. See `perf.md`.
+- `fuser` showing a render node "busy" proves nothing here: one process holds open handles on all
+  32 cards while running on one. Before blaming OOM on your own graph, check for an *active*
+  workload (`ps` on the pids) — an OOM signature that does not move when you cut resolution means
+  someone else holds the VRAM. Also, the JZL node swallows per-segment exceptions and returns an
+  empty bus, so ComfyUI reports `status=success` for a run that produced nothing; confirm the mp4
+  and the `采样完成` / `✅ 解码完成` log lines instead.
 - SDPA on XPU must avoid the cuDNN backend (`CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH`); MATH works.
 - TP=8 heavy allreduce can permanently drop a PCIe root port to Gen1 and only a power cycle
   recovers it — see `vllm_tp8_pcie_downgrade.md`.

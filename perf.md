@@ -205,6 +205,51 @@ interfere numerically. Two cards buy 1.9× throughput for 5% latency — far bet
 vLLM-Omni's TP2+DLO, which needs both cards to run a single request at roughly the same
 per-step cost as one card here.
 
+### SOL vs SLA vs VSA
+
+Measured 2026-10-29, one Arc Pro B60 per run in the `llm-scaler-omni:0.2.0-b2` image. Each
+method is paired with a dense run of the *identical* graph, weights, step count and seed, so
+the per-step delta is attributable to the sparse patch alone.
+
+| method | task | steps | per-step dense → sparse | speedup | sparse steps |
+|---|---|---:|---|---:|---:|
+| SOL `tau=1.3`, start 0.0 | ref2va | 8 | 46.37 → 36.97 s | **1.25×** | 8/8 |
+| SLA `keep_percent=15` | fl2v | 4 | 45.92 → 37.06 s | **1.24×** | 4/4 |
+| VSA `keep_percent=10`, start 0.2 | fl2v | 8 | 44.87 → 42.48 s | **1.06×** | 6/8 |
+
+The three are **not** cross-comparable on quality: SOL ran on ref2va with the turbo LoRA,
+SLA on fl2v with the Turbo-SLA LoRA (the task it was trained for), VSA on fl2v with the
+FastH3 V2 checkpoint. Only the per-step ratio is a fair comparison. Each against its own
+dense control: SOL 18.5 dB, SLA 24.08 dB, VSA 15.74 dB PSNR, with frame mean/std within a
+few percent throughout — judge the clips, not the PSNR.
+
+VSA's gain is much smaller, and its own log says why: `VSA tiles (44864 padded rows, 41
+prefix tiles)` — the 40,694 real rows are padded to 44,864 (+10% work) and the learned
+coarse branch costs more than the exact blocks it saves. Its `keep_percent=10` is also the
+value the checkpoint was trained at, so unlike SOL's `tau` it cannot be tuned down without
+leaving the trained policy.
+
+#### Traps hit while measuring (each cost real runs)
+
+- **`fasth3_omniref_8step_pruned_int8_convrot` cannot be loaded by ComfyUI's H3 nodes.** Its
+  metadata reads `source: transformer_ref` — it is the reference branch's *second* DiT, with
+  a different AdaLN basis and a PDD 32-step schedule. Both the JZL ref2va graph and a native
+  r2v graph fail identically with `The size of tensor a (32) must match the size of tensor b
+  (1024)`. Use `fastvideo_fasth3_8step_v2_pruned_int8_convrot` from
+  `FastVideo/FastVideo-FastH3-Comfy`, which is the file the image's own FastH3 template names.
+- **The template's settings beat the recipe table for a given checkpoint.** The FastH3
+  template uses shift **10/3**, 8 steps and `res_multistep` for the 8-step V2 checkpoint,
+  while `docs/SPARSE_ATTENTION.md`'s VSA row (4 steps, euler, 12/3) describes a different,
+  4-step artifact.
+- **`fuser` saying a card is busy proves nothing.** On this host one process holds open
+  handles on all 32 render nodes while running on exactly one. Four consecutive OOMs came
+  from another tenant's `h3_gpu` job on XPU 16; the giveaway is an OOM signature that does
+  not move — 12.69 GiB allocated, 51 MiB free, 126 MiB requested — however far you cut the
+  resolution. Look for an active workload, not an open fd.
+- **The JZL node swallows per-segment exceptions** and returns an empty bus, so ComfyUI
+  reports `status=success` for a run that produced nothing. Always confirm the mp4 exists and
+  the container log shows `采样完成` / `✅ 解码完成`.
+
 ## diffusers
 
 Single card, BF16, **root modular layout** (`~/work/models/MiniMax-H3`, not the
