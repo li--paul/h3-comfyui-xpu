@@ -299,6 +299,153 @@ Interestingly the 4-step *sparse* run keeps more motion than the 4-step dense on
 4.56), so at this step count the sparse patch changes the trajectory noticeably; judge by
 watching, not by the numbers.
 
+## Where the time goes, and what each optimisation changes
+
+Everything below is measured on this host. The point of the layering is that each optimisation
+attacks a *different* term, so their speedups multiply while their costs do not overlap.
+
+```
+total   = fixed overhead (TE encode + VAE decode + mux, 40-100 s)  +  steps x per-step
+per-step = attention + FFN/linear + norm/RoPE + weight movement (DLO / offload)
+```
+
+| optimisation | term it changes |
+|---|---|
+| JZL staged offloading | makes the run fit at all — neither the multiplier nor the per-step |
+| OmniXPU native kernels | the constant factor inside a step |
+| turbo LoRA | **the step count** |
+| SOL / SLA / VSA | **attention**, inside a step |
+| int8 / FP8 / bf16 | **FFN and weight bandwidth**, inside a step |
+
+### Layer 1 — JZL staged offloading: it buys capacity, not speed
+
+The three components are individually large and never needed at the same time, but ComfyUI
+holds them together by default:
+
+| component | int8 | bf16 |
+|---|---:|---:|
+| DiT | 19.5 GiB | 37.5 GiB |
+| text encoder (Qwen3-VL 32B) | 25.3 GiB | 48 GiB |
+| video + audio VAE | 4.8 + 0.6 GiB | same |
+
+The JZL node owns the whole graph, so it knows the phase boundaries and unloads between them:
+
+```
+1 encode : CLIP + video VAE -> encode -> unload
+2 sample : DiT + video VAE + audio VAE -> N steps
+3 decode : video VAE + audio VAE -> video + audio
+```
+
+Its log shows it waiting for VRAM to settle before each phase
+(`[JZL阶段] TE编码前 显存稳定：可用 24480 MB`). A hand-built native graph doing the same job
+holds the TE and the DiT together and dies:
+
+```
+XPU out of memory. Tried to allocate 126 MiB. 23.91 GiB total, 51 MiB free
+12.69 GiB allocated by PyTorch
+```
+
+The price is a reload per phase — that is the 40–100 s fixed overhead. It does **not** change
+the per-step cost: JZL dense 46.37 s against a native graph's 45.92 s on fl2v.
+
+### Layer 2 — OmniXPU native kernels: same maths, faster operators
+
+This is the whole of the 1.51× gap between our `.venv` and Intel's image, with identical output:
+
+| | per-step | frame mean/std |
+|---|---:|---|
+| `.venv`: int8 weights, dequantise to BF16, BF16 GEMM | **70.1 s** | 109.4 / 69.6 |
+| image: native int8 GEMM + CUTE attention | **46.37 s** | 109.3 / 69.7 |
+
+Stock ComfyUI hardcodes `supports_int8_compute() -> False` for Intel XPU, so every linear
+dequantises (`q.float() * scale`, then the ConvRot rotation is undone) before a BF16 matmul.
+The image's Kitchen `xpu` backend runs the int8 GEMM directly with int32 accumulation, routes
+our attention shape through a CUTE kernel (`attention CUTE_BHLD_D128: heads=56 q=41042`), and
+adds native RMS-RoPE / GroupNorm / AdaLN plus an H3-specific segmented RMS modulation patch.
+
+### Layer 3 — turbo LoRA: fewer steps, nothing else
+
+The adapter is distilled to land on the *teacher's converged output* rather than reproduce its
+trajectory, so 8 steps (or 4) reach roughly where 50 Euler steps would. It carries its own
+sampling contract in the filename, which the server enforces:
+
+| artifact | task | steps | flow_shift |
+|---|---|---:|---:|
+| `ref2v_turbo_8step_v1.0_768p` | Ref2VA | 8 | 6 |
+| `ref2v_turbo_4step_v1.0_768p` | Ref2VA | 4 | 6 |
+| `fl2v_turbo_4step_v0.1` | T2VA / FL2VA | 4 | 12 |
+
+Its effective strength is only 1/16: every artifact is rank 128 with `alpha=8`, and the delta is
+applied at `scale × alpha / rank`. It nudges the base weights rather than replacing the model.
+
+Measured on ref2va with graph, sampler and seed held fixed:
+
+| steps | per-step | E2E | motion |
+|---|---:|---:|---:|
+| 8 (turbo) | 46.37 s | 470.2 s | 11.47 |
+| 4 (turbo) | 46.31 s | 270.1 s | **7.10** |
+
+Per-step is unchanged; only the multiplier moves. The cost is motion: −35% on ref2va and −50%
+on t2va, where prompt adherence also loosens.
+
+### Layer 4 — SOL / SLA / VSA: cheaper attention inside a step
+
+All three split the sequence into 64-token blocks and attend only a routed subset of key blocks
+exactly.
+
+| method | selection | needs | measured |
+|---|---|---|---:|
+| SOL | training-free, per-block σ threshold `tau`; unselected blocks each contribute one pooled term and **stay in the softmax denominator** | nothing beyond base + turbo | **1.25–1.30×** |
+| SLA | fixed top-k% of key blocks | a LoRA distilled against that pattern | **1.24×** |
+| VSA | 3D video-cube tiling + a learned coarse-gate branch | a FastH3 checkpoint with `to_gate_compress` | 1.06× |
+
+SOL's design is why it survives aggressive settings: it approximates rather than truncates, so
+`tau=2.0` (≈2.7% of blocks exact) still leaves the frame statistics intact.
+
+The reason the ceiling is ~1.3× rather than 5× is that attention is only part of a step. From
+the SOL delta on ref2va, attention is at most 9.4 s of the 46.37 s step (~20%); the remaining
+~37 s is FFN/linear, normalisation and weight movement.
+
+VSA's 1.06× is explained by its own log — `VSA tiles (44864 padded rows, 41 prefix tiles)`:
+40,694 real rows are padded to 44,864 (+10% work) and the learned coarse branch costs about
+what the exact blocks save.
+
+### Layer 5 — precision: FFN and bandwidth
+
+| configuration | per-step | cards |
+|---|---:|---:|
+| int8 native (image) | 46.37 s | 1 |
+| int8 storage + BF16 compute (`.venv`) | 70.1 s | 1 |
+| FP8 online (vLLM-Omni) | 37.06 s | 2 |
+| BF16 full partition (vLLM-Omni) | 40.1 s | 2 |
+
+int8 is not only a memory saving here: with a native GEMM it also removes the dequantise step,
+which is why it beats the dequantising `.venv` path by 1.51×. Whether native int8 beats native
+bf16 GEMM is still open — that is what the `ref2va_pruned_bf16` comparison is for.
+
+### The layers multiply
+
+The fastest ref2va configuration is exactly this stack:
+
+```
+4-step turbo + SOL, one card:
+  ~89 s fixed overhead + 4 x 37.91 s = 240 s
+  turbo   : 2x   (8 -> 4 steps)
+  SOL     : 1.22x per step
+  int8    : 1.51x per step
+  JZL     : makes it fit
+```
+
+Against 8-step dense on `.venv` (652 s) that is 2.7×, not the 3.7× the factors suggest, because
+fixed overhead does not shrink with the optimisations and the 4-step run pays its motion cost.
+
+### Not measured
+
+- No per-operator profiler breakdown. The "attention ≤20% of a step" figure is inferred from the
+  SOL delta, not from `torch.profiler`.
+- No same-graph bf16 control yet (the 40.2 GB `ref2va_pruned_bf16` download is in flight).
+- No 6-step run: the turbo artifacts are distilled at 8 and 4, so 6 would be extrapolation.
+
 ## All measured configurations on B60
 
 Everything measured on this host, one row per configuration. `step` is the per-denoise-step
