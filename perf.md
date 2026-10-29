@@ -259,6 +259,25 @@ leaving the trained policy.
   reports `status=success` for a run that produced nothing. Always confirm the mp4 exists and
   the container log shows `采样完成` / `✅ 解码完成`.
 
+### Fewer steps: the 4-step turbo LoRA on ref2va
+
+`minimax_h3_ref2v_turbo_4step_v1.0_768p_comfyui_bf16` on the same JZL ref2va graph,
+same sampler (`res_multistep`/`beta`), same seed, 4 steps instead of 8:
+
+| config | per-step | E2E | frame mean | std | motion |
+|---|---:|---:|---:|---:|---:|
+| 8-step dense | 46.37 s | 470.2 s | 109.3 | 69.7 | 11.47 |
+| 8-step SOL | 36.97 s | 370.2 s | 108.4 | 70.1 | 11.50 |
+| 4-step dense | 46.31 s | 270.1 s | 98.3 | 69.8 | 7.10 |
+| **4-step SOL** | **37.91 s** | **240.1 s** | 102.8 | 87.9 | 7.66 |
+
+4-step SOL is the fastest ref2va configuration measured (240 s against 370 s for 8-step
+SOL, 1.54× end to end), and the sparse patch still contributes 1.22× per step. The cost is
+visible: **temporal motion drops from ~11.5 to ~7.1–7.7** (−35%) and the mean level drops
+~5%, which is the "4 steps loses fast motion" effect the turbo authors warn about. The clip
+itself stays sharp and on-prompt; the higher std is the scene's contrast, not artefacts. Both
+clips carry AAC audio.
+
 ## diffusers
 
 Single card, BF16, **root modular layout** (`~/work/models/MiniMax-H3`, not the
