@@ -98,6 +98,20 @@ VAE patch-parallel 2. Server start-up 70–120 s, excluded from the numbers belo
 | 1 | FP8 online | **yes** | 8 | 6 | 1376x768 | 338-349 s | 14.7 GiB | **114.6 (68.4)** |
 | 2 | BF16 | **yes** | 8 | 6 | 1376x768 | 375 s | 18.7 GiB | **114.7 (68.9)** |
 | 3 | FP8 online | none (base model) | 50 | 12 | 1024x576 | 943 s | 12.4 GiB | 71.8 (71.8) |
+| 4 | BF16, **one** GPU (DLO 2 layers) | **yes** | 8 | 6 | 1376x768 | 700 s | 19.7 GiB | **114.7 (69.0)** |
+
+Row 4 is the single-card capacity path: `--num-gpus 1` with DLO at only 2 resident layers,
+no `--quantization fp8`, so the DiT stays 62 GB and streams over PCIe every step. It fits
+(19.7 GiB of 24) and the frame statistics are identical to the two-card BF16 row
+(114.7/69.0 against 114.7/68.9), but E2E is 1.87× slower — half the compute and ~59 GB of
+streaming per step.
+
+**`--diffusion-offload-config '{"mode":"layer", ...}'` cannot be combined with the turbo
+LoRA.** The recipe's own "Single GPU: blockwise capacity path" uses it, and any request that
+binds an adapter then fails with `MiniMax-H3 Turbo dynamic LoRA does not support layerwise
+offload` (`minimax_h3/lora.py:298`). The guard rejects `MODEL_LEVEL` and `LAYER_WISE` but not
+`DISTRIBUTED_LAYER_WISE`, so single-card + LoRA must use
+`--enable-distributed-layerwise-offload --dlo-resident-layers N` instead.
 
 All three produce correct output. Rows 1-2 use the turbo adapter and its mandated
 schedule; row 3 is the undistilled base model on its own schedule, so it needs about
