@@ -214,14 +214,23 @@ the per-step delta is attributable to the sparse patch alone.
 | method | task | steps | per-step dense → sparse | speedup | sparse steps |
 |---|---|---:|---|---:|---:|
 | SOL `tau=1.3`, start 0.0 | ref2va | 8 | 46.37 → 36.97 s | **1.25×** | 8/8 |
+| SOL `tau=1.3`, start 0.0 | **t2va** | 8 | 42.04 → 32.27 s | **1.30×** | 8/8 |
 | SLA `keep_percent=15` | fl2v | 4 | 45.92 → 37.06 s | **1.24×** | 4/4 |
 | VSA `keep_percent=10`, start 0.2 | fl2v | 8 | 44.87 → 42.48 s | **1.06×** | 6/8 |
+
+Packed sequence length and sink rows per task, from the node's own verbose output:
+ref2va 41,042 rows with sinks `(0, 45)/(38, 45)`; fl2v 40,694 with `(0, 40)/(32, 40)`; t2va
+38,622 with `(0, 7)/(0, 7)` — no reference rows, so only 7 prefix rows. t2va is the cheapest
+per step *and* the best sparse speedup, which says the gain does not depend on the
+conditioning layout.
 
 The three are **not** cross-comparable on quality: SOL ran on ref2va with the turbo LoRA,
 SLA on fl2v with the Turbo-SLA LoRA (the task it was trained for), VSA on fl2v with the
 FastH3 V2 checkpoint. Only the per-step ratio is a fair comparison. Each against its own
-dense control: SOL 18.5 dB, SLA 24.08 dB, VSA 15.74 dB PSNR, with frame mean/std within a
-few percent throughout — judge the clips, not the PSNR.
+dense control: SOL 18.5 dB, SOL-t2va 12.2 dB, SLA 24.08 dB, VSA 15.74 dB PSNR, with frame
+mean/std within a few percent throughout — judge the clips, not the PSNR. On t2va the sparse
+run came out brighter and higher contrast than dense (93.1/74.0 vs 85.7/65.1) with a
+different composition; both clips are clean and on-prompt.
 
 VSA's gain is much smaller, and its own log says why: `VSA tiles (44864 padded rows, 41
 prefix tiles)` — the 40,694 real rows are padded to 44,864 (+10% work) and the learned
