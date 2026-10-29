@@ -299,6 +299,67 @@ Interestingly the 4-step *sparse* run keeps more motion than the 4-step dense on
 4.56), so at this step count the sparse patch changes the trajectory noticeably; judge by
 watching, not by the numbers.
 
+## All measured configurations on B60
+
+Everything measured on this host, one row per configuration. `step` is the per-denoise-step
+time from the runtime's own progress bar (ⓜ) or derived from E2E minus fixed overhead (ⓓ);
+`E2E` is the wall time for one 1376×768 / 124-frame clip at seed 1001. Fixed overhead
+(TE encode + VAE decode + mux) is 40–100 s per run and is why E2E never equals steps × step.
+
+### ComfyUI + `llm-scaler-omni:0.2.0-b2`, single card, pruned int8_convrot DiT
+
+| # | task | graph | optimisation | steps | step | sampling | E2E | frame mean/std | note |
+|---:|---|---|---|---:|---:|---:|---:|---|---|
+| 1 | ref2va | JZL | turbo 8-step | 8 | **46.37** ⓜ | 371 s | 470.2 | 109.3 / 69.7 | dense baseline |
+| 2 | ref2va | JZL | SOL τ1.0, start 0.2 | 8 | — | — | 410.2 | 108.8 / 69.9 | step not sampled |
+| 3 | ref2va | JZL | SOL τ1.3, start 0.2 | 8 | 40.53 ⓜ | 324 s | 410.4 | 109.2 / 69.9 | first 3 steps dense |
+| 4 | ref2va | JZL | SOL τ2.0, start 0.2 | 8 | — | — | 390.2 | 109.2 / 69.8 | step not sampled |
+| 5 | ref2va | JZL | **SOL τ1.3, start 0.0** | 8 | **36.97** ⓜ | 296 s | 370.2 | 108.4 / 70.1 | 8/8 steps sparse |
+| 6 | ref2va | JZL | turbo **4-step** | 4 | 46.31 ⓜ | 185 s | 270.1 | 98.3 / 69.8 | motion 7.10 |
+| 7 | ref2va | JZL | **turbo 4-step + SOL** | 4 | **37.91** ⓜ | 152 s | **240.1** | 102.8 / 87.9 | motion 7.66 |
+| 8 | ref2va | JZL | SLA LoRA (off-spec) | 4 | 46.67 ⓜ | 187 s | 290.1 | 116.4 / 73.0 | fl2v LoRA on ref2va |
+| 9 | ref2va | JZL | SLA keep 15 (off-spec) | 4 | 38.22 ⓜ | 153 s | 250.1 | 113.8 / 68.3 | timing only |
+| 10 | fl2v | native i2v | SLA 4-step, dense | 4 | 45.92 ⓜ | 184 s | 260.1 | 128.4 / 74.7 | in-spec |
+| 11 | fl2v | native i2v | **SLA keep 15** | 4 | **37.06** ⓜ | 148 s | **190.1** | 130.3 / 73.6 | PSNR 24.1 dB |
+| 12 | fl2v | native i2v | FastH3 V2, dense | 8 | 44.87 ⓜ | 359 s | 420.2 | 122.5 / 78.4 | V2 checkpoint |
+| 13 | fl2v | native i2v | VSA keep 10, start 0.2 | 8 | 42.48 ⓜ | 340 s | 430.2 | 128.9 / 76.1 | +10% tiling padding |
+| 14 | t2va | native t2v | turbo 8-step | 8 | 42.04 ⓜ | 336 s | 410.2 | 85.7 / 65.1 | |
+| 15 | t2va | native t2v | **SOL τ1.3, start 0.0** | 8 | **32.27** ⓜ | 258 s | 330.1 | 93.1 / 74.0 | best speedup, 1.30× |
+| 16 | t2va | native t2v | turbo 4-step | 4 | 41.94 ⓜ | 168 s | 240.1 | 94.2 / 80.8 | motion 4.56 |
+| 17 | t2va | native t2v | **turbo 4-step + SOL** | 4 | **33.11** ⓜ | 132 s | **210.1** | 93.6 / 84.3 | motion 7.15 |
+
+### Our own `.venv` ComfyUI 0.42.0, single card
+
+| # | task | quantisation | optimisation | steps | step | E2E | frame mean/std |
+|---:|---|---|---|---:|---:|---:|---|
+| 18 | ref2va | int8 weights, **BF16 compute** | turbo 8-step | 8 | **70.1** ⓜ | 652.0 | 109.4 / 69.6 |
+
+Same weights and same frame statistics as row 1 but **1.51× slower per step** — the gap is the
+missing native int8 GEMM and CUTE attention, not the model.
+
+### vLLM-Omni, **two** cards (TP2 + DLO 12 layers)
+
+| # | task | weights | optimisation | steps | step | E2E | frame mean/std |
+|---:|---|---|---|---:|---:|---:|---|
+| 19 | ref2va | BF16 partition | turbo 8-step | 8 | 40.1 ⓓ | 375 | 114.7 / 68.9 |
+| 20 | ref2va | FP8 online | turbo 8-step | 8 | **37.06** ⓜ | 349.8 | 114.6 / 68.4 |
+| 21 | ref2va | BF16 | base, euler | 20 | 38.5 ⓜ | 824.0 | 55.9 / 30.5 ✗ |
+| 22 | ref2va | BF16 | base, res_multistep | 20 | 36.94 ⓜ | 789.9 | 61.1 / 34.9 ✗ |
+| 23 | ref2va | BF16 | base, euler | 50 | 38.0 ⓓ | 1902.0 | 71.9 / 35.7 |
+| 24 | ref2va | FP8 | base @1024×576 | 50 | 17.8 ⓓ | 942.7 | 71.8 / 73.3 |
+
+### What the table says
+
+- **Per-step cost does not depend on the step count.** The same graph and weights give
+  41.94 vs 42.04 s at 4 and 8 steps (t2va) and 37.91 vs 36.97 s (ref2va). Steps are purely an
+  end-to-end multiplier; quality is what they buy.
+- **Sparse attention is worth 1.22–1.30× per step** on SOL and SLA, independent of task, and
+  only 1.06× on VSA (its tiling pads 40,694 rows to 44,864).
+- **One card of ComfyUI matches two cards of vLLM-Omni**: 37.06 s/step both, but vLLM-Omni
+  needs TP2 + DLO to get there.
+- The fastest end-to-end clips are fl2v + SLA (190 s) and t2va 4-step + SOL (210 s); the
+  fastest ref2va is 4-step + SOL (240 s).
+
 ## diffusers
 
 Single card, BF16, **root modular layout** (`~/work/models/MiniMax-H3`, not the
