@@ -278,6 +278,27 @@ visible: **temporal motion drops from ~11.5 to ~7.1–7.7** (−35%) and the mea
 itself stays sharp and on-prompt; the higher std is the scene's contrast, not artefacts. Both
 clips carry AAC audio.
 
+### Fewer steps on t2va
+
+The same 4-step fl2v artifact also serves T2VA (the recipe table lists it as "T2VA / FL2VA"),
+and the t2v graph is the i2v subgraph with no first_frame, so only the adapter and step count
+change:
+
+| config | per-step | E2E | frame mean | std | motion |
+|---|---:|---:|---:|---:|---:|
+| 8-step dense | 42.04 s | 410.2 s | 85.7 | 65.1 | 9.15 |
+| 8-step SOL | 32.27 s | 330.1 s | 93.1 | 74.0 | 9.17 |
+| 4-step dense | 41.94 s | 240.1 s | 94.2 | 80.8 | 4.56 |
+| **4-step SOL** | **33.11 s** | **210.1 s** | 93.6 | 84.3 | 7.15 |
+
+Per-step cost is identical at 4 and 8 steps, so the step count is a pure end-to-end lever:
+330 → 210 s (1.57×), with the sparse patch still worth 1.27× per step. The cost is larger than
+on ref2va: **t2va dense loses half its motion** (9.15 → 4.56) and prompt adherence loosens —
+an "empty village road" prompt comes back with a car and power lines at 4 steps but not at 8.
+Interestingly the 4-step *sparse* run keeps more motion than the 4-step dense one (7.15 vs
+4.56), so at this step count the sparse patch changes the trajectory noticeably; judge by
+watching, not by the numbers.
+
 ## diffusers
 
 Single card, BF16, **root modular layout** (`~/work/models/MiniMax-H3`, not the
