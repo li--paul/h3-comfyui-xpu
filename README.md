@@ -1,6 +1,7 @@
 # diffusers-h3
 
-Intel XPU AI stack in a single `uv` virtual environment (CPython 3.12):
+Intel XPU AI stack in a `uv` virtual environment (CPython 3.12), with optional
+standalone environments for the two video paths:
 
 - **PyTorch** `2.14.0+xpu` (from `https://download.pytorch.org/whl/xpu`)
 - **vLLM-Omni** `0.32.0rc1` (built from source, `VLLM_OMNI_TARGET_DEVICE=xpu`)
@@ -42,6 +43,36 @@ To start completely from scratch:
 ```bash
 rm -rf .venv && uv sync
 ```
+
+### Standalone environments
+
+`setup.sh` builds the combined `.venv`. If you only need one of the two video
+paths, build just that one instead — each is self-contained, so a fresh host
+never pulls the other path's dependencies:
+
+| script | venv | installs |
+|---|---|---|
+| `./setup_comfyui_env.sh` | `.venv-comfy` | torch + ComfyUI 0.42.0 + Intel's XPU kernel stack + 64 GB of H3 weights |
+| `./setup_vllm_omni_env.sh` | `.venv-omni` | `envs/vllm-omni/pyproject.toml`: torch + vllm + vllm-omni, both built from source |
+
+```bash
+./setup_comfyui_env.sh                  # env in a few minutes, then 64 GB of weights
+./setup_comfyui_env.sh --skip-models    # env only, reuse an existing model dir
+./setup_comfyui_env.sh --check          # verify only, change nothing
+
+./setup_vllm_omni_env.sh                # 30-60 min: uv sync compiles vllm
+./setup_vllm_omni_env.sh --check
+./setup_vllm_omni_env.sh --download     # also fetch the 270 GB of checkpoint partitions
+```
+
+Both are opt-in. The generation scripts read `COMFY_VENV` / `OMNI_VENV` and fall
+back to `.venv-xpu` / `.venv`, so an existing tree keeps working untouched.
+
+`setup_comfyui_env.sh` does not reimplement the XPU port: it calls
+`setup_xpu_comfy.sh` with `XPU_NO_COPY=1` and installs in place, so that logic
+exists once. `setup_vllm_omni_env.sh` keeps `envs/vllm-omni/pyproject.toml` in
+lockstep with the root `pyproject.toml` — **when you bump the vllm pins, update
+both**, or the two resolutions drift apart.
 
 ## How it works
 
@@ -152,6 +183,35 @@ pipe("a photo of a cat on the moon").images[0].save("out.png")
 .venv/bin/python vendor/ComfyUI/main.py --listen 0.0.0.0 --port 8188
 ```
 
+For MiniMax-H3 the launcher pins four things that silently produce the wrong
+video if omitted (card mask, input directory, output directory, offload policy):
+
+```bash
+./run_xpu_comfy.sh --gpu 16 --port 8288 --out h3_output/xpu_comfy
+```
+
+Before `exec` it probes `omni_xpu_kernel` (AOT target, torch minor, `cute`, and
+the Sol-Attn op) and refuses to start when anything is off — a degraded kernel
+raises no error, the same clip just takes 70.1 s/step instead of 47.2.
+
+The XPU kernel stack (`omni_xpu_kernel` + Kitchen's `xpu` provider + the
+`ComfyUI-OmniXPU` node) is installed by `setup_xpu_comfy.sh`, which has two
+sources for the kernel wheel:
+
+```bash
+./setup_xpu_comfy.sh                    # default: extract it from intel/llm-scaler-omni:0.2.0-b2
+./setup_xpu_comfy.sh --kernel-from-source   # compile it from llm-scaler (no docker, ~10 min)
+./setup_xpu_comfy.sh --check            # verify only
+./run_xpu_comfy.sh --build-kernel ...   # compile inline if the probe fails
+```
+
+The source path drives Intel's own release harness
+(`comfy-kitchen-xpu/packaging/omni_xpu_kernel/build_uv_wheel_matrix.sh`) rather
+than a hand-rolled compile, and pins the llm-scaler revision to the window that
+both accepts torch 2.14 and still bundles Sol-Attn. Two ways to get that wrong,
+both silent: an older revision fails to build, a newer one drops Sol-Attn into a
+separate wheel and `--sol` quietly stops being sparse.
+
 ### MiniMax-H3 video generation
 
 `h3-test.sh` runs one H3 shot on a single card and writes to `h3_output/`:
@@ -168,44 +228,106 @@ vendored in `h3_input/`. Expect ~11 min on one Arc Pro B60 (8 steps at ~70 s/ste
 
 ### MiniMax-H3 via vLLM-Omni
 
-`vllm-omni-run.sh` drives the same model through vLLM-Omni instead (2+ GPUs,
-tensor parallel + layerwise offload), writing to `vllm-omni-output/`:
+`vllm-omni-run.sh` drives the same model through vLLM-Omni instead (1 GPU with
+distributed layerwise offload, or 2+ GPUs with tensor parallel), writing to
+`vllm-omni-output/`:
 
 ```bash
 ./vllm-omni-run.sh download --task ref2va        # checkpoint + turbo LoRA
 ./vllm-omni-run.sh status
 ./vllm-omni-run.sh run --gpus 2 --precision fp8 --lora 8step
+./vllm-omni-run.sh run --gpus 1 --precision bf16 --task t2va --lora 8step
 ./vllm-omni-run.sh run --profile smoke           # 1024x576, 2 steps, no LoRA
 ./vllm-omni-run.sh serve --gpus 2 --precision bf16 --keep-server
 ./vllm-omni-run.sh generate --prompt "a fox in falling snow"
 ./vllm-omni-run.sh stop
 ```
 
-`--precision` is `fp8` or `bf16`; `--task` is `ref2va` (image references) or
-`fl2va` (text/first-frame only); `--lora 8step|4step|none` pins the turbo
-schedule (the server rejects a step/flow_shift mismatch, so the script sets them
-for you). `--attn TORCH_SDPA`, `--no-dlo` and `--resident-layers N` expose the
-tuning knobs.
+`--precision` is `fp8` or `bf16`; `--task` is `ref2va` (image references),
+`fl2va` (first/last frame) or `t2va` (text only — same `FL2VA` partition, the
+request field differs); `--lora 8step|4step|none` pins the turbo schedule (the
+server rejects a step/flow_shift mismatch, so the script sets them for you).
+`--attn TORCH_SDPA`, `--no-dlo` and `--resident-layers N` expose the tuning
+knobs; on `--gpus 1` the resident-layer default drops to 2 by itself, because 12
+needs ~15 GB and OOMs on a 24 GB card.
 
 > **Configuration gotcha:** the turbo adapter must be sent in each request, not just
 > preloaded. Without it the server runs the base model at 8 steps and the clip comes out
 > dark and blurred. `vllm-omni-run.sh` handles this; see `perf.md` for the before/after.
 
+### Generating from a project directory
+
+Both paths have an entry point that takes a directory instead of flags. Same
+layout for either:
+
+```
+<project>/
+  input/prompt.txt     required; the whole file is the prompt
+  input/img/*.png      0 files -> text-to-video; 1..9 -> text+reference-to-video
+  output/              created if missing; the mp4 lands here
+```
+
+```bash
+./gen_video.sh <project>/                  # ComfyUI, both modes from one server
+./gen_video.sh <project>/ --sol --steps 8  # + sparse attention
+./gen_video.sh <project>/ --restart        # force a server restart
+
+./gen_video_omni.sh <project>/             # vLLM-Omni, single card BF16 + DLO 2 layers
+./gen_video_omni.sh <project>/ --restart   # required when switching modes
+```
+
+Both default to 720p, 5 seconds (1376x768 / 124 frames @ 24 fps), 8 steps with
+the turbo adapter, seed 1001, and verify the artefact afterwards (size, frame
+count, audio track) rather than trusting the HTTP status.
+
+Measured on one Arc Pro B60, same shot and seed:
+
+| entry point | mode | per step | wall | peak VRAM | frame mean |
+|---|---|---:|---:|---:|---:|
+| `gen_video.sh --sol` | ref2v | 37.6 s | 380 s | — | 110.1 |
+| `gen_video.sh` | t2v | 42.0 s | 410 s | — | 82.7 |
+| `gen_video_omni.sh` | t2v | 55.1 s | 503 s | 18.0 GiB | 81.3 |
+| `gen_video_omni.sh` | ref2v | 77.3 s | 696 s | 19.7 GiB | 114.7 |
+
+ComfyUI is roughly 2x faster because its pruned int8_convrot DiT stays resident
+(21 GB); vLLM-Omni streams the 62 GB BF16 DiT over PCIe every step.
+
+What is **not** interchangeable between the two:
+
+- ComfyUI serves both modes from one server. vLLM-Omni needs a different
+  checkpoint partition (`FL2VA` vs `Ref2VA`), so switching modes restarts the
+  server. `gen_video_omni.sh` records the running task in
+  `vllm-omni-output/server.task` and refuses to reuse the wrong one.
+- ComfyUI reference images go through `POST /upload/image`, so switching
+  projects never needs `--input-directory` changed or the server restarted.
+  Leaving that flag off a fresh server is what silently drops the reference rows
+  (token count 41042 -> 38970, frame mean 109 -> 87).
+- Single-card vLLM-Omni must use BF16 plus
+  `--enable-distributed-layerwise-offload --dlo-resident-layers 2`. The recipe's
+  `--diffusion-offload-config` cannot be combined with the turbo LoRA at all
+  (`lora.py:298` rejects `MODEL_LEVEL` and `LAYER_WISE`, but not
+  `DISTRIBUTED_LAYER_WISE`).
+
 ### Performance
 
 Full measurements — quantization, step counts, memory, and the quality verdict
 per configuration — live in **[perf.md](perf.md)**. Headline numbers for the same
-5-second 1376×768 shot (seed 1001):
+5-second 1376×768 reference-to-video shot (seed 1001):
 
 | runtime | precision | steps | cards | wall | peak VRAM | output |
 |---|---|---|---:|---:|---:|---|
-| ComfyUI | INT8 ConvRot | 8 | 1 | 652 s | 21.4 GB | correct |
+| ComfyUI (stock `.venv`) | INT8 ConvRot | 8 | 1 | 652 s | 21.4 GB | correct |
+| ComfyUI + XPU kernel | INT8 ConvRot | 8 | 1 | 470 s | 21.4 GB | correct |
+| ComfyUI + XPU kernel + SOL | INT8 ConvRot | 8 | 1 | **380 s** | 21.4 GB | correct |
 | vLLM-Omni | FP8 online + turbo LoRA | 8 | 2 | 338–349 s | 14.7 GiB/rank | correct |
 | vLLM-Omni | BF16 + turbo LoRA | 8 | 2 | 375 s | 18.7 GiB/rank | correct |
+| vLLM-Omni | BF16 + turbo LoRA | 8 | 1 | 696 s | 19.7 GiB | correct |
 | diffusers | BF16, layer-streamed | 8 | 1 | ~920 s | 17.6 GiB | correct |
 
-All four produce a correct clip once configured properly. FP8 is the sweet spot for
-vLLM-Omni: ~27 % less per-rank memory than BF16 and 7–11 % faster.
+All of them produce a correct clip once configured properly. For vLLM-Omni, FP8 is
+the sweet spot on two cards: ~27 % less per-rank memory than BF16 and 7–11 % faster.
+Single-card vLLM-Omni cannot use it — the measured profile there is BF16 with
+distributed layerwise offload, because the 62 GB DiT has to stream over PCIe every step.
 
 > **Gotcha:** the turbo adapter must be named **in the request**
 > (`-F 'lora={"name":…,"path":…}'`). A server-side `--lora-path` only preloads it; without
@@ -214,13 +336,32 @@ vLLM-Omni: ~27 % less per-rank memory than BF16 and 7–11 % faster.
 
 ## Layout
 
-- `.venv/` — virtual environment (uv)
+- `.venv/` — combined environment (uv); `.venv-comfy/` and `.venv-omni/` are the optional standalone ones
+- `pyproject.toml` + `uv.lock` — declarative environment for `.venv`
+- `setup.sh` — one-command setup for `.venv` (oneAPI env + `uv sync`)
+
+ComfyUI / XPU path:
+
+- `setup_comfyui_env.sh` — build `.venv-comfy` from scratch (ComfyUI + XPU stack + weights)
+- `setup_xpu_comfy.sh` — install the XPU kernel stack; `--kernel-from-source` compiles it instead of extracting it from the image
+- `run_xpu_comfy.sh` — start ComfyUI pinned to one card, with the kernel preflight gate
+- `gen_video.sh` — project-directory entry point (text-to-video / reference-to-video)
+- `comfyui_h3_gen.py` — API graph builder and submitter behind `gen_video.sh`
+
+vLLM-Omni path:
+
+- `envs/vllm-omni/pyproject.toml` + `uv.lock` — standalone project for `.venv-omni`
+- `setup_vllm_omni_env.sh` — build `.venv-omni` from scratch (compiles vllm)
+- `gen_video_omni.sh` — project-directory entry point for the same two modes
+- `vllm-omni-run.sh` — lower-level driver (`download` / `serve` / `generate` / `run` / `stop` / `status`)
+
+Shared:
+
 - `vendor/vllm/` — vllm `v0.32.0` source checkout (path source)
 - `vendor/vllm-omni/` — vllm-omni `v0.32.0rc1` source checkout (path source)
 - `vendor/ComfyUI/` — ComfyUI source checkout (run in place)
-- `h3_input/` — MiniMax-H3 custom nodes, API workflow, and reference assets
+- `h3_input/` — MiniMax-H3 custom nodes, API workflow, reference assets, turbo LoRAs
 - `h3_output/` — H3 test renders (sample output committed; `server.log` ignored)
-- `vllm-omni-output/` — H3 renders and server logs from `vllm-omni-run.sh`
+- `vllm-omni-output/` — H3 renders, server logs, and the `server.task` marker
 - `perf.md` — measured H3 performance/quality across runtimes, precisions, steps
-- `pyproject.toml` — declarative environment + `uv.lock`
-- `setup.sh` — one-command setup (oneAPI env + `uv sync`)
+- `性能分析.md` — the same analysis in Chinese, with the reasoning behind each number
