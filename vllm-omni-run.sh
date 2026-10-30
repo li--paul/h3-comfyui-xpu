@@ -12,10 +12,20 @@
 # Examples:
 #   ./vllm-omni-run.sh download --task ref2va
 #   ./vllm-omni-run.sh serve --gpus 2 --precision fp8 --task ref2va
+#   ./vllm-omni-run.sh serve --gpus 1 --precision bf16 --task t2va   # single card
 #   ./vllm-omni-run.sh generate --prompt "a fox in the snow" --image h3_input/assets/03-村口-实景.png
 #   ./vllm-omni-run.sh run --gpus 2 --precision fp8 --lora 8step
 #   ./vllm-omni-run.sh run --gpu-ids 30,31 --precision bf16 --lora none --steps 20
 #   ./vllm-omni-run.sh run --profile smoke          # 1024x576, 2 steps, ~2 min (deliberately under-denoised)
+#
+# --task t2va and --task fl2va share the FL2VA partition: --task-type names the
+# partition, extra_params.task names the request. --task ref2va needs the Ref2VA
+# partition, so switching between text-only and reference-image generation needs
+# a different server, not just a different request.
+#
+# On one GPU the resident-layer default drops to 2 (12 needs ~15 GB and OOMs on
+# a 24 GB card). OMNI_VENV points the script at another venv, e.g. the one
+# setup_vllm_omni_env.sh builds.
 #
 # NOTE (retraction, 2026-10-24): an earlier version of this header claimed the XPU
 # diffusion path itself produced dark/blurred video. That was wrong. The adapter
@@ -29,6 +39,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="$ROOT/vllm-omni-output"
+# Which venv holds vllm/vllm-omni. Override to use a dedicated env built by
+# setup_vllm_omni_env.sh (e.g. OMNI_VENV=$ROOT/.venv-omni).
+VENV="${OMNI_VENV:-$ROOT/.venv}"
 MODEL_ROOT="${MODEL_ROOT:-$HOME/work/models/MiniMax-H3}"
 LORA_DIR="${LORA_DIR:-$ROOT/h3_input/loras}"
 PIDFILE="$OUT_DIR/server.pid"
@@ -43,11 +56,12 @@ PRECISION="fp8"
 TASK="ref2va"
 ATTN=""
 RESIDENT_LAYERS=12
+RESIDENT_LAYERS_SET=0   # so --gpus 1 can pick its own default
 DLO=1
 LORA="8step"
 PROFILE=""
 PROMPT="An empty village road in the low morning sun before anyone comes. Photorealistic live-action film look, natural daylight."
-IMAGE="$ROOT/h3_input/assets/03-村口-实景.png"
+IMAGE=("$ROOT/h3_input/assets/03-村口-实景.png")   # ref2va: one or more; --image appends
 WIDTH=1376
 HEIGHT=768
 FPS=24
@@ -126,8 +140,8 @@ lora_file() {
     case "$TASK:$LORA" in
         ref2va:8step) echo "minimax_h3_ref2v_turbo_8step_v1.0_768p_bf16.safetensors" ;;
         ref2va:4step) echo "minimax_h3_ref2v_turbo_4step_v1.0_768p_bf16.safetensors" ;;
-        fl2va:8step)  echo "minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors" ;;
-        fl2va:4step)  echo "minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors" ;;
+        fl2va:8step|t2va:8step) echo "minimax_h3_fl2v_turbo_8step_v1.0_768p_bf16.safetensors" ;;
+        fl2va:4step|t2va:4step) echo "minimax_h3_fl2v_turbo_4step_v1.0_768p_bf16.safetensors" ;;
         *:none)       echo "" ;;
         *)            die "--lora must be 8step, 4step or none (got '$LORA')" ;;
     esac
@@ -186,10 +200,15 @@ cmd_serve() {
 
     local partition
     case "$TASK" in
-        ref2va) partition="$MODEL_ROOT/Ref2VA" ;;
-        fl2va)  partition="$MODEL_ROOT/FL2VA" ;;
+        ref2va)      partition="$MODEL_ROOT/Ref2VA" ;;
+        fl2va|t2va)  partition="$MODEL_ROOT/FL2VA" ;;
     esac
     [ -d "$partition" ] || die "checkpoint partition missing: $partition (run: $0 download --task $TASK)"
+
+    # A t2va request is served by the fl2va partition; --task-type names the
+    # partition, while extra_params.task names the request.
+    local SERVER_TASK="$TASK"
+    [ "$TASK" = t2va ] && SERVER_TASK=fl2va
 
     local lora_path=""
     if [ "$LORA" != "none" ]; then
@@ -225,7 +244,7 @@ cmd_serve() {
         # the engine dies deep inside worker init with a misleading
         # "device index is out of range".
         local avail
-        avail="$("$ROOT/.venv/bin/python" -c 'import torch; print(torch.xpu.device_count())' 2>/dev/null | tail -1)"
+        avail="$("$VENV/bin/python" -c 'import torch; print(torch.xpu.device_count())' 2>/dev/null | tail -1)"
         if [[ "$avail" =~ ^[0-9]+$ ]]; then
             local id
             for id in ${gpu_ids//,/ }; do
@@ -236,6 +255,14 @@ cmd_serve() {
         gpu_ids="$(seq -s, 0 $((GPU_COUNT - 1)))"
     fi
 
+    # 12 resident DiT layers need ~15 GB; on one 24 GB card that evicts the
+    # activations and OOMs. 2 is the measured single-card value (19.7 GiB peak,
+    # perf.md row 4). Only applies when --resident-layers was not given.
+    if [ "$GPU_COUNT" -eq 1 ] && [ "$RESIDENT_LAYERS_SET" -eq 0 ]; then
+        RESIDENT_LAYERS=2
+        say "single GPU: defaulting to $RESIDENT_LAYERS resident DiT layers (--resident-layers overrides)"
+    fi
+
     # oneAPI's setvars.sh assigns a global array named `args` (and resets
     # positional params), so it must run BEFORE we build the command array.
     load_oneapi
@@ -243,7 +270,7 @@ cmd_serve() {
     local srv_args=(
         serve "$partition"
         --omni --trust-remote-code --host 127.0.0.1 --port "$PORT"
-        --task-type "$TASK"
+        --task-type "$SERVER_TASK"
         --num-gpus "$GPU_COUNT"
         --tensor-parallel-size "$GPU_COUNT"
         --text-encoder-tp-size "$GPU_COUNT"
@@ -272,7 +299,7 @@ cmd_serve() {
     if port_in_use; then
         die "port $PORT already has a listener (another tenant's server?); refusing to start."$'\n'"      Ours would fail to bind while /health answered from theirs, and the request would go to the wrong engine."$'\n'"      Pick a free port with --port (e.g. --port 18090)."
     fi
-    nohup "$ROOT/.venv/bin/vllm" "${srv_args[@]}" > "$LOG" 2>&1 &
+    nohup "$VENV/bin/vllm" "${srv_args[@]}" > "$LOG" 2>&1 &
     echo $! > "$PIDFILE"
     say "pid $(cat "$PIDFILE"), log $LOG"
 
@@ -289,7 +316,7 @@ cmd_serve() {
 
 cmd_generate() {
     server_pid >/dev/null || die "no server running; start one with '$0 serve' or use '$0 run'"
-    [ -f "$IMAGE" ] || warn "reference image not found: $IMAGE (ref2va needs --image)"
+    [ ${#IMAGE[@]} -eq 0 ] || [ -f "${IMAGE[0]}" ] || warn "reference image not found: ${IMAGE[0]} (ref2va needs --image)"
 
     local steps="${STEPS:-8}" flow="${FLOW_SHIFT:-6}"
     # Non-default sampler/quality must appear in the name: two runs that differ only
@@ -326,9 +353,18 @@ cmd_generate() {
     if [ -n "$adapter" ]; then
         form+=(-F "lora={\"name\":\"h3-${LORA}\",\"path\":\"${adapter}\"}")
     fi
-    if [ "$TASK" = "ref2va" ] && [ -f "$IMAGE" ]; then
-        form+=(-F "input_reference=@$IMAGE;type=image/png")
-    elif [ "$TASK" = "fl2va" ]; then
+    if [ "$TASK" = "ref2va" ]; then
+        # One reference uses input_reference; several must use repeated
+        # input_references fields (the server rejects mixing the two).
+        case ${#IMAGE[@]} in
+            0) ;;
+            1) [ -f "${IMAGE[0]}" ] && form+=(-F "input_reference=@${IMAGE[0]};type=image/png") ;;
+            *) for f in "${IMAGE[@]}"; do
+                   [ -f "$f" ] || die "reference image not found: $f"
+                   form+=(-F "input_references=@$f;type=image/png")
+               done ;;
+        esac
+    elif [ "$TASK" = "fl2va" ] || [ "$TASK" = "t2va" ]; then
         form+=(-F "aspect_ratio=16:9")
     fi
 
@@ -343,7 +379,7 @@ cmd_generate() {
     say "saved $OUT_FILE"
     grep -iE 'x-inference-time-s|x-peak-memory-mb' "$headers" | sed 's/^/  /' || true
 
-    "$ROOT/.venv/bin/python" - "$OUT_FILE" <<'PY' || true
+    "$VENV/bin/python" - "$OUT_FILE" <<'PY' || true
 import sys
 try:
     import av
@@ -408,11 +444,11 @@ while [ $# -gt 0 ]; do
         --precision) PRECISION="$2"; shift 2 ;;
         --task) TASK="$2"; shift 2 ;;
         --attn) ATTN="$2"; shift 2 ;;
-        --resident-layers) RESIDENT_LAYERS="$2"; shift 2 ;;
+        --resident-layers) RESIDENT_LAYERS="$2"; RESIDENT_LAYERS_SET=1; shift 2 ;;
         --no-dlo) DLO=0; shift ;;
         --lora) LORA="$2"; shift 2 ;;
         --prompt) PROMPT="$2"; shift 2 ;;
-        --image) IMAGE="$2"; shift 2 ;;
+        --image) if [ ${#IMAGE[@]} -eq 1 ] && [ "${IMAGE[0]}" = "$ROOT/h3_input/assets/03-村口-实景.png" ]; then IMAGE=(); fi; IMAGE+=("$2"); shift 2 ;;
         --width) WIDTH="$2"; shift 2 ;;
         --height) HEIGHT="$2"; shift 2 ;;
         --fps) FPS="$2"; shift 2 ;;
@@ -438,7 +474,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-case "$TASK" in ref2va|fl2va) ;; *) die "--task must be ref2va or fl2va" ;; esac
+case "$TASK" in ref2va|fl2va|t2va) ;; *) die "--task must be ref2va, fl2va or t2va" ;; esac
 case "$PRECISION" in fp8|bf16) ;; *) die "--precision must be fp8 or bf16" ;; esac
 case "$LORA" in 8step|4step|none) ;; *) die "--lora must be 8step, 4step or none" ;; esac
 case "${SAMPLER:-euler}" in euler|res_multistep) ;; *) die "--sampler must be euler or res_multistep" ;; esac

@@ -1,0 +1,217 @@
+# Declarative environment for the vLLM-Omni MiniMax-H3 path on one Intel Arc B60.
+#
+# This is deliberately separate from the repository root pyproject.toml. The
+# root one builds the combined dev env (.venv) and drags in the whole ComfyUI
+# dependency set; this one is only what `vllm serve --omni` needs, so a fresh
+# host can build it without pulling comfy-kitchen / comfy-aimdo / spandrel.
+#
+# KEEP THE [tool.uv] SECTIONS IN SYNC WITH ../../pyproject.toml. Each one mirrors
+# the official vLLM-Omni XPU Docker build and silently breaks resolution if it
+# drifts. When bumping vllm or vllm-omni, update the dependency-metadata lists
+# in BOTH files.
+[project]
+name = "vllm-omni-h3"
+version = "0.1.0"
+description = "vLLM-Omni MiniMax-H3 video generation on Intel XPU (single card)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    # --- PyTorch XPU wheel stack (from the pytorch-xpu index) ---
+    # torchaudio is frozen at 2.11.0: the XPU index has no 2.13/2.14 build.
+    "torch==2.14.0",
+    "torchvision==0.29.0",
+    "torchaudio==2.11.0",
+    "triton-xpu==3.8.0",
+    "torchcodec>=0.14",
+    "vllm-xpu-kernels==0.1.15.4",
+    "diffusers==0.40.0",
+
+    # --- built from source (see [tool.uv.sources] + no-build-isolation) ---
+    # Everything else they need comes from the dependency-metadata blocks below,
+    # which mirror vllm-omni's own requirements/{xpu,common}.txt.
+    "vllm",
+    "vllm-omni",
+]
+
+[tool.uv]
+index-strategy = "unsafe-best-match"
+
+# openai-whisper and xgrammar declare a dependency on the stock `triton`
+# package, but on XPU the `triton` import must be provided by `triton-xpu`
+# (the two are mutually exclusive, like in the official vLLM-Omni XPU image).
+exclude-dependencies = ["triton"]
+
+# vllm / vllm-omni must build against the already-installed torch (+xpu),
+# exactly like the official vLLM-Omni XPU Dockerfile (uv pip --no-build-isolation).
+no-build-isolation-package = ["vllm", "vllm-omni"]
+
+# Build tools that the source builds require, installed before each build.
+extra-build-dependencies = {
+    vllm = [
+        "cmake>=3.26.1",
+        "ninja",
+        "packaging>=24.2",
+        "setuptools>=78.1.1,<81.0.0",
+        "setuptools-scm>=8.0",
+        "setuptools-rust>=1.9.0",
+        "wheel",
+        "jinja2",
+        "grpcio-tools",
+        "protobuf",
+        "nanobind",
+    ],
+    "vllm-omni" = [
+        "setuptools>=77.0.3,<81.0.0",
+        "wheel",
+        "setuptools-scm>=8.0",
+    ],
+}
+
+# Device selection for the XPU source builds.
+extra-build-variables = {
+    vllm = {
+        VLLM_TARGET_DEVICE = "xpu",
+        VLLM_WORKER_MULTIPROC_METHOD = "spawn",
+    },
+    "vllm-omni" = {
+        VLLM_OMNI_TARGET_DEVICE = "xpu",
+    },
+}
+
+# The cloned third-party trees must NOT be auto-discovered as workspace members.
+[tool.uv.workspace]
+exclude = ["../../vendor/*"]
+
+[[tool.uv.index]]
+name = "pytorch-xpu"
+url = "https://download.pytorch.org/whl/xpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-xpu" }
+torchvision = { index = "pytorch-xpu" }
+torchaudio = { index = "pytorch-xpu" }
+torchcodec = { index = "pytorch-xpu" }
+triton-xpu = { index = "pytorch-xpu" }
+vllm = { path = "../../vendor/vllm" }
+vllm-omni = { path = "../../vendor/vllm-omni" }
+
+# Static metadata for vllm / vllm-omni: uv must not execute their setup.py to
+# resolve the graph (vllm's setup.py imports torch at module level, and both
+# derive their dependency list from the installed torch backend at build time).
+# The lists mirror vllm-omni's own requirements/{xpu,common}.txt.
+[[tool.uv.dependency-metadata]]
+name = "vllm"
+version = "0.32.0"
+requires-dist = [
+    "regex",
+    "cachetools",
+    "psutil",
+    "sentencepiece",
+    "numpy",
+    "requests >= 2.33.0",
+    "tqdm",
+    "blake3",
+    "py-cpuinfo",
+    "transformers >= 5.16.1, < 5.20.0",
+    "huggingface_hub >= 1.31.0",
+    "tokenizers >= 0.23.2",
+    "safetensors >= 0.6.2",
+    "protobuf >= 5.29.6, !=6.30.*, !=6.31.*, !=6.32.*, !=6.33.0.*, !=6.33.1.*, !=6.33.2.*, !=6.33.3.*, !=6.33.4.*; platform_machine != \"s390x\"",
+    "protobuf == 7.36.1; platform_machine == \"s390x\"",
+    "fastapi[standard] >= 0.133.0, < 0.137.0",
+    "starlette >= 1.0.1",
+    "aiohttp >= 3.14.3",
+    "openai >= 2.25.0",
+    "pydantic >= 2.12.0",
+    "prometheus_client >= 0.18.0",
+    "pillow >= 12.3.0",
+    "prometheus-fastapi-instrumentator >= 8.0.0",
+    "tiktoken >= 0.6.0",
+    "lm-format-enforcer == 0.11.3",
+    "llguidance >= 1.7.0, < 1.8.0; platform_machine == \"x86_64\" or platform_machine == \"arm64\" or platform_machine == \"aarch64\" or platform_machine == \"ppc64le\" or platform_machine == \"s390x\"",
+    "outlines_core == 0.2.14",
+    "lark == 1.2.2",
+    "xgrammar == 0.2.8; platform_machine == \"x86_64\" or platform_machine == \"aarch64\" or platform_machine == \"arm64\" or platform_machine == \"s390x\" or platform_machine == \"ppc64le\"",
+    "typing_extensions >= 4.10",
+    "filelock >= 3.20.3",
+    "partial-json-parser",
+    "jsonschema >= 4.23.0",
+    "pyzmq >= 25.0.0",
+    "msgspec",
+    "mistral_common[image] >= 1.11.6",
+    "opencv-python-headless >= 4.13.0",
+    "pyyaml",
+    "six>=1.16.0; python_version > '3.11'",
+    "setuptools>=78.1.1,<81.0.0; python_version > '3.11'",
+    "einops",
+    "compressed-tensors == 0.17.0",
+    "depyf==0.20.0",
+    "cloudpickle",
+    "watchfiles",
+    "python-json-logger",
+    "ninja",
+    "pybase64",
+    "cbor2",
+    "ijson",
+    "setproctitle",
+    "oss-harmony >= 0.0.11",
+    "anthropic >= 0.71.0",
+    "model-hosting-container-standards >= 0.1.14, < 1.0.0",
+    "mcp >= 2.0.0, < 3.0.0",
+    "opentelemetry-sdk >= 1.27.0",
+    "opentelemetry-api >= 1.27.0",
+    "opentelemetry-exporter-otlp >= 1.27.0",
+    "opentelemetry-semantic-conventions-ai >= 0.4.1",
+    "ray>=2.9",
+    "cmake>=3.26.1",
+    "packaging>=24.2",
+    "setuptools-scm>=8",
+    "setuptools-rust>=1.9.0",
+    "setuptools>=78.1.1,<81.0.0",
+    "wheel",
+    "jinja2>=3.1.6",
+    "datasets",
+    "numba == 0.65.0",
+    "torch==2.14.0",
+    "torchaudio",
+    "torchvision",
+    "torchcodec >= 0.14",
+    "auto_round_lib==0.16.0",
+    "vllm_xpu_kernels==0.1.15.4",
+]
+
+[[tool.uv.dependency-metadata]]
+name = "vllm-omni"
+version = "0.32.0rc1"
+requires-dist = [
+    "transformers >= 5.16.1, < 5.20.0",
+    "av>=14.0.0",
+    "typing_extensions>=4.13",
+    "omegaconf>=2.3.0",
+    "diffusers==0.40.0",
+    "kernels==0.16.1",
+    "safetensors>=0.8.0",
+    "accelerate==1.12.0",
+    "soundfile>=0.13.1",
+    "soxr>=0.5.0.post1",
+    "cache-dit==1.5.0",
+    "tqdm>=4.66.0",
+    "torchsde>=0.2.6",
+    "openai-whisper>=20250625",
+    "imageio[ffmpeg]>=2.37.2",
+    "x-transformers>=2.12.2",
+    "einops>=0.8.1",
+    "prettytable>=3.8.0",
+    "aenum==3.1.16",
+    "pyzmq>=25.0.0",
+    "janus>=1.0.0",
+    "msgpack>=1.0.0",
+    "pydantic>=2.12.0",
+    "pydantic-settings>=2.0.0",
+    "gguf>=0.10.0",
+    "cosmos-guardrail>=0.3.1",
+    "scipy>=1.11.0",
+    "s3tokenizer==0.3.0",
+    "onnxruntime>=1.23.2",
+    "auto-round-lib",
+]

@@ -3,18 +3,25 @@
 Intel XPU AI-stack scaffolding repo (PyTorch + vLLM-Omni + Diffusers + ComfyUI + LTX-2) on
 Intel Arc B60/B70 GPUs. Declarative env in `pyproject.toml`, everything else is thin wrappers.
 
-## Two virtual environments — the single most important fact
+## Virtual environments — the single most important fact
 
 | env | path | holds |
 |---|---|---|
 | main | `.venv/` | torch 2.14.0+xpu, vllm, vllm-omni, ComfyUI deps, the server, benchmarks |
 | LTX-2 | `vendor/LTX-2/.venv/` | ltx-core / ltx-pipelines on **torch 2.12**, deliberately isolated transformers version |
+| ComfyUI XPU | `.venv-comfy/` or `.venv-xpu/` | torch 2.14.0+xpu + ComfyUI 0.42.0 + Intel's XPU kernel stack (`setup_comfyui_env.sh`) |
+| vLLM-Omni | `.venv-omni/` | torch 2.14.0+xpu + vllm + vllm-omni, source builds only (`setup_vllm_omni_env.sh`) |
 
 The two torch versions differ on purpose (`setup.sh` pins the LTX venv to 2.12). Do not
 "harmonize" them; LTX-2 upstream is untested on 2.14.
 
 Always invoke a script with the interpreter that owns its deps. `ltx_server.py` itself runs in
 `.venv` but shells out to `ltx-gen.sh`, which uses the LTX venv — the split is intentional.
+
+`.venv-comfy` and `.venv-omni` exist so a fresh host can build only what one path needs
+instead of the whole combined `.venv`. Both are opt-in: `gen_video.sh` reads `COMFY_VENV`,
+`gen_video_omni.sh` / `vllm-omni-run.sh` read `OMNI_VENV`, and both fall back to the
+repo defaults (`.venv-xpu` and `.venv`) so the existing tree keeps working untouched.
 
 ## Commands
 
@@ -34,6 +41,39 @@ PYTHONPATH=vendor/ComfyUI .venv/bin/python -c "import comfy.model_management as 
 
 No tests, linter, formatter, typechecker, or CI exist. Verification is the smoke commands above.
 Run a single thing rather than a suite.
+
+## Generating video from a project directory
+
+Two entry points, same layout:
+
+```
+<project>/
+  input/prompt.txt     required; the whole file is the prompt
+  input/img/*.png      0 files -> text-to-video; 1..9 -> text+reference-to-video
+  output/              the mp4 lands here
+```
+
+| | ComfyUI | vLLM-Omni |
+|---|---|---|
+| command | `./gen_video.sh <project>/` | `./gen_video_omni.sh <project>/` |
+| env | `COMFY_VENV` (default `.venv-xpu`) | `OMNI_VENV` (default `.venv`) |
+| 720p 5 s ref2v | ~350 s with SOL, ~380 s dense | ~696 s |
+| 720p 5 s t2v | ~410 s | ~503 s |
+
+ComfyUI is the latency path: its pruned int8_convrot DiT stays resident (21 GB). vLLM-Omni
+streams the 62 GB BF16 DiT over PCIe every step, which is the whole 2x — use it when you need
+the API or parity with the official reference implementation, not for speed.
+
+What is not interchangeable between them:
+
+- ComfyUI serves both modes from one server. vLLM-Omni needs a different checkpoint partition
+  (FL2VA vs Ref2VA), so switching modes restarts the server; `gen_video_omni.sh` records the
+  running task in `vllm-omni-output/server.task` and refuses to reuse the wrong one.
+- vLLM-Omni must name the adapter in every request (`lora={"name","path"}`). A server-side
+  `--lora-path` alone is deactivated by the next request and silently runs the base model.
+- Single-card vLLM-Omni must use BF16 plus
+  `--enable-distributed-layerwise-offload --dlo-resident-layers 2`. The recipe's
+  `--diffusion-offload-config` cannot be combined with the turbo LoRA at all.
 
 ## `vendor/` is gitignored and rebuilt by `setup.sh`
 
