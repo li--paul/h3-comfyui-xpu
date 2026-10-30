@@ -17,6 +17,12 @@
 #   ./run_xpu_comfy.sh                          # card 16, port 8288
 #   ./run_xpu_comfy.sh --gpu 17 --port 8388
 #   ./run_xpu_comfy.sh --out h3_output/mytest -- --verbose
+#   ./run_xpu_comfy.sh --build-kernel           # compile the XPU kernel first
+#
+# Before launching it probes omni_xpu_kernel (target, torch minor, cute, and the
+# Sol-Attn op) and refuses to start if anything is off — a degraded kernel is
+# silent, just ~1.5x slower. Build it once with
+# `./setup_xpu_comfy.sh --kernel-from-source`; --build-kernel does that inline.
 #
 # Extra args after `--` are forwarded to ComfyUI.
 set -euo pipefail
@@ -29,6 +35,7 @@ PORT="${XPU_PORT:-8288}"
 OUT="$ROOT/h3_output/xpu_comfy"
 IN_DIR="$ROOT/h3_input/assets"
 EXTRA=()
+BUILD_KERNEL="${XPU_KERNEL_AUTOBUILD:-0}"
 
 say()  { printf '\033[1;36m[xpu-comfy]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[xpu-comfy] %s\033[0m\n' "$*" >&2; exit 1; }
@@ -38,8 +45,9 @@ while [ $# -gt 0 ]; do
         --gpu)  GPU="$2"; shift 2 ;;
         --port) PORT="$2"; shift 2 ;;
         --out)  OUT="$2"; shift 2 ;;
+        --build-kernel) BUILD_KERNEL=1; shift ;;
         --)     shift; EXTRA=("$@"); break ;;
-        -h|--help) sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "unknown option: $1 (use -- to pass args to ComfyUI)" ;;
     esac
 done
@@ -69,6 +77,63 @@ if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
 fi
 
 mkdir -p "$OUT"
+
+# --- XPU kernel gate --------------------------------------------------------
+# A missing or mismatched omni_xpu_kernel does NOT raise: every adapter quietly
+# falls back to eager torch code and the same clip takes 70.1 s/step instead of
+# 47.2. So this is a hard gate, not a warning.
+kernel_probe() {
+    "$VENV/bin/python" - <<'PY' 2>/dev/null
+import sys
+try:
+    import torch
+    import omni_xpu_kernel as omni
+    from omni_xpu_kernel import cute
+except Exception:
+    sys.exit(1)
+want = ".".join(torch.__version__.split("+")[0].split(".")[:2])
+got = ".".join(omni.__torch_version__.split(".")[:2])
+ok = (omni.__xpu_target__ == "bmg" and got == want
+      and omni.is_available() and cute.is_available()
+      # b3 moved Sol-Attn to a separate wheel; without this symbol --sol still
+      # runs but is dense (39.3 -> 47.2 s/step, no error).
+      and hasattr(cute, "sol_attn"))
+sys.exit(0 if ok else 1)
+PY
+}
+
+kernel_desc() {
+    "$VENV/bin/python" - <<'PY' 2>/dev/null
+import torch, omni_xpu_kernel as omni
+from omni_xpu_kernel import cute
+print(f"{omni.__version__} on torch {omni.__torch_version__}, "
+      f"cute={cute.is_available()}, sol_attn={hasattr(cute, 'sol_attn')}")
+PY
+}
+
+ensure_kernel() {
+    if kernel_probe; then
+        say "xpu kernel ok: $(kernel_desc)"
+        return
+    fi
+    if [ "$BUILD_KERNEL" -eq 1 ]; then
+        say "xpu kernel missing or built for another torch/target"
+        say "building from source (30-90 min, once) — setup_xpu_comfy.sh --kernel-from-source"
+        XPU_VENV="$VENV" XPU_SRC_VENV="$VENV" XPU_NO_COPY=1 \
+            "$ROOT/setup_xpu_comfy.sh" --kernel-from-source \
+            || die "kernel build failed"
+        kernel_probe || die "build finished but the probe still fails"
+        say "xpu kernel ok: $(kernel_desc)"
+    else
+        die "omni_xpu_kernel is missing or was built for another torch/target.
+      ComfyUI would run ~1.5x slower with NO error (70.1 vs 47.2 s/step).
+      Fix:  ./setup_xpu_comfy.sh --kernel-from-source
+      or:   ./run_xpu_comfy.sh --build-kernel ..."
+    fi
+}
+
+ensure_kernel
+
 say "ComfyUI from $VENV on XPU $GPU ($RENDER_NODE), port $PORT, out $OUT"
 exec env ZE_AFFINITY_MASK="$GPU" "$VENV/bin/python" "$COMFY/main.py" \
     --listen 127.0.0.1 --port "$PORT" \
