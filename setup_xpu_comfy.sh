@@ -48,8 +48,8 @@ KITCHEN_REV="${KITCHEN_REV:-3c9c495f3c648166ec4b0c69b676904f09b53267}"
 XPU_TARGET="${XPU_TARGET:-bmg}"
 TORCH_EXPECT="${TORCH_EXPECT:-2.14.0+xpu}"
 
-VENV="$ROOT/.venv-xpu"
-SRC_VENV="$ROOT/.venv"
+VENV="${XPU_VENV:-$ROOT/.venv-xpu}"
+SRC_VENV="${XPU_SRC_VENV:-$ROOT/.venv}"
 VENDOR="$ROOT/vendor"
 KITCHEN_DIR="$VENDOR/comfy-kitchen-xpu"
 NODE_DIR="$VENDOR/ComfyUI-OmniXPU"
@@ -110,6 +110,12 @@ check_kitchen_versions() {
 
 # --- steps -----------------------------------------------------------------
 copy_venv() {
+    # Callers that already built their own venv set XPU_NO_COPY=1 and install in place.
+    if [ "${XPU_NO_COPY:-0}" -eq 1 ]; then
+        [ -x "$VENV/bin/python" ] || die "XPU_NO_COPY=1 but $VENV has no python"
+        say "in-place install into $VENV (no copy)"
+        return
+    fi
     if [ -d "$VENV" ] && [ "$FORCE" -eq 0 ]; then
         say "venv copy exists: $VENV ($(du -sh "$VENV" | cut -f1)) — skipping"
         return
