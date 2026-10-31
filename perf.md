@@ -695,7 +695,7 @@ vLLM-Omni 0.32.0rc1 built from source into `.venv-omni`. Same prompt, seed 1001.
 | runtime | mode | config | wall | per step | artefact |
 |---|---|---|---:|---:|---|
 | ComfyUI + XPU kernel | t2v | `fl2va_pruned_fp8_scaled` DiT + nvfp4 encoder, 1376×768, 124 f, 8 steps | **300 s** | 37.5 s | 124 frames, AAC 32 kHz, frame mean 82.3–95.2 (std 57.6–65.5) |
-| ComfyUI + XPU kernel | ref2v | `ref2va_pruned_int8_convrot` DiT, same shape | — | — | aborts (1) |
+| ComfyUI + XPU kernel | ref2v | `ref2va_pruned_int8_convrot` DiT, same shape | **280 s** | 35 s | 124 frames, AAC 32 kHz, frame mean 106.7–111.6 (std 61) — needs fix (1) |
 | vLLM-Omni, 1 card BF16 + DLO 2 | t2va | `FL2VA/` partition | — | — | aborts (2) |
 | vLLM-Omni, 1 card BF16 + DLO 2 | ref2va | `Ref2VA/` partition | — | — | aborts (1) |
 
@@ -706,26 +706,44 @@ same shape: the eager-int8 B70 baseline in `~/work/nv_h3` (40.3 s/step) and the
 stock B60 figure above (42 s/step). The clip is well exposed, so the int8 path
 through `omni_xpu_kernel` is working, not just fast.
 
-**(1) Any reference-image run aborts inside torch-xpu's indexing kernel.**
+**(1) `torch.nonzero` returns wrong indices on this runtime, which is what broke every
+reference-image run.** The symptom is an abort far away from the cause:
 
 ```
 torch-xpu-ops .../ATen/native/xpu/sycl/Indexing.h:622:
 Assertion `index >= -sizes_[i] && index < sizes_[i] && "index out of bounds"` failed
 ```
 
-- ComfyUI hits it twice: first in the Qwen3-VL DeepStack inject
-  (`comfy/text_encoders/llama.py:1066`, `x[visual_pos_masks] = ...`), then — once that
-  line is rewritten with `index_select`/`index_copy_` — in
-  `comfy/ldm/minimax/model.py:577` (`all_video_rows[~img_update] = ...`), and finally
-  `Indexing.cpp:627` on `index_copy_` itself.
-- vLLM-Omni's ref2va dies on the **same** assertion while binding the reference image,
-  so this is the runtime, not either harness.
-- Ruled out: the OmniXPU node (`OMNIXPU_ENABLE=0` behaves identically), reference-image
-  size (2752×1568 and 1376×784 both die), graph capture (`enable_graph` is gated on
+The minimal repro needs no ComfyUI and no weights:
+
+```python
+m = torch.zeros(176, dtype=torch.bool, device="xpu"); m[7:151] = True
+m.nonzero(as_tuple=True)[0].cpu()   # 144 values, but the tail is garbage: [..., 1, 1, 1]
+m.cpu().nonzero(as_tuple=True)[0]   # the correct, sorted list
+```
+
+`mask.sum()` is right (`144`), the mask round-trips correctly, and the index list starts
+correctly — only the tail is wrong and unsorted. Length-dependent: 64 is fine, 65–1000
+are broken, 4096 and 41042 are fine. Boolean-mask **writes** convert the mask through
+`nonzero` and therefore abort in the index kernel; boolean-mask **reads** convert the
+same way and fail *silently*, returning the wrong rows.
+
+That is why the failure looked so arbitrary:
+
+- ComfyUI ref2v does three such mask writes — the Qwen3-VL DeepStack inject
+  (`comfy/text_encoders/llama.py:1066`) and the two `_embed_and_pack` scatters
+  (`comfy/ldm/minimax/model.py:577`, `:582`) — and dies on the first one.
+- t2v never builds a boolean mask, so it was unaffected.
+- vLLM-Omni's ref2va dies on the **same** assertion from its own mask use, which is why
+  the suspicion moved to the runtime rather than either harness.
+- Ruled out along the way: the OmniXPU node (`OMNIXPU_ENABLE=0` identical), reference
+  image size (2752×1568 and 1376×784 both die), graph capture (`enable_graph` is gated on
   `is_device_cuda`), and upstream code drift (ComfyUI master has the same line).
-- t2v never executes that path, which is why it is the one mode that works.
-  The `llama.py`/`model.py` patches used to reach the later crashes were reverted;
-  `vendor/` is unmodified.
+
+Fix: `setup_xpu_comfy.sh` now patches those three call sites to compute the index list on
+the CPU (`mask.cpu().nonzero(...)`) and use `index_select`/`index_copy_`. A boolean mask is
+tiny, so the cost is not measurable; with it, ref2v runs at 35 s/step and the clip is
+correct. The patch is idempotent and lives in the script, not in `vendor/`.
 
 **(2) vLLM-Omni text-only (`t2va`) fails earlier and differently**: the text encoder
 receives zero token ids, so `_get_rope_index` calls `torch.cat` on an empty list at

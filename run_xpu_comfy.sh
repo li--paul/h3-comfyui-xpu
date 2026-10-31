@@ -51,6 +51,11 @@ fi
 # `urKernelSetArgLocal@LIBUR_LOADER_0.12` that intel-sycl-rt's libsycl.so.9 needs —
 # torch fails to import. Keep the loader search inside the venv (see run_vllm_tp.sh).
 export LD_LIBRARY_PATH="$VENV/lib"
+# The AIMDO XPU provider's linux default is its native_hook mode, which must be
+# LD_PRELOADed before Python starts — impossible from inside ComfyUI, where torch is
+# already imported. `global` applies the same control overlay (aimdo_xpu.so instead of
+# the CUDA library) without the preload, and is the mode the provider admits here.
+export AIMDO_XPU_ALLOCATOR_MODE="${AIMDO_XPU_ALLOCATOR_MODE:-global}"
 COMFY="$ROOT/vendor/ComfyUI"
 GPU="${XPU_GPU:-16}"
 PORT="${XPU_PORT:-8288}"

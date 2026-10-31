@@ -262,14 +262,18 @@ Each mirrors the official vLLM-Omni XPU Docker build; do not "simplify" them:
   `采样完成` / `✅ 解码完成` lines instead.
 - TP=8 heavy allreduce can permanently drop a PCIe root port to Gen1 and only a power
   cycle recovers it — see `vllm_tp8_pcie_downgrade.md`.
-- **On this host every reference-image (ref2v) run aborts in `torch-xpu`.** Both harnesses
-  die on `Indexing.h:622 Assertion ... "index out of bounds"`: ComfyUI first in the
-  Qwen3-VL DeepStack inject (`comfy/text_encoders/llama.py:1066`), vLLM-Omni while binding
-  the reference image. t2v never enters that path, and it is the only mode that works —
-  ComfyUI t2v measures 300 s for 1376×768/124 f/8 steps on the B70 (`perf.md`,
-  2026-10-31). Don't chase this as a config problem: `OMNIXPU_ENABLE=0`, smaller
-  reference images and graph-capture flags change nothing, and patching those two ComfyUI
-  lines only moves the abort to `Indexing.cpp:627`.
+- **`torch.nonzero` is broken on this runtime, and it is what breaks every ref2v run.**
+  For many mask lengths (64 is fine, 65–1000 wrong, 4096/41042 fine) it returns the right
+  count but a garbage, unsorted tail; mask *writes* then abort inside a torch-xpu index
+  kernel (`Indexing.h:622`) and mask *reads* silently return the wrong rows. Minimal repro:
+  `m = torch.zeros(176, dtype=torch.bool, device="xpu"); m[7:151] = True;
+  m.nonzero(as_tuple=True)[0].cpu()` → tail `[1,1,1]`. `setup_xpu_comfy.sh` therefore
+  patches ComfyUI's three mask-write sites (DeepStack inject in
+  `comfy/text_encoders/llama.py`, the two `_embed_and_pack` scatters in
+  `comfy/ldm/minimax/model.py`) to compute indices on the CPU and use
+  `index_select`/`index_copy_`. Idempotent and script-owned — never hand-patch `vendor/`.
+  Without that patch ref2v dies; with it ref2v is 280 s at 1376×768/8 steps (35 s/step).
+  vLLM-Omni's ref2va hits the same primitive from its own code and is still unpatched.
 - **vLLM-Omni `t2va` is broken here regardless of prompt**: the encoder receives zero
   token ids (`torch.cat` on an empty list at 1376×768; a ~4.3e9 GiB allocation at
   512×288). The environment itself builds and serves fine (`setup_vllm_omni_env.sh` →
@@ -302,6 +306,16 @@ a bare `xpu backend False` / `int8 disabled` with no hint of the missing library
 `setup_xpu_comfy.sh` now installs onednn from PyPI (its libs land in `<venv>/lib`, already
 on the pinned `LD_LIBRARY_PATH`), re-tests `is_available()` before skipping extraction on a
 rerun, and prints the swallowed `ImportError` when the kernel still fails to load.
+
+**`comfy_aimdo` needs its XPU provider or it silently runs the CUDA library.** The image
+ships two co-installable providers next to the kernel — `omni_xpu_kernel` *and*
+`comfy-aimdo-xpu-runtime` — and the second is not on PyPI, so extracting only the first
+leaves `detect_vendor()` with neither `cuda` nor `rocm`, a warning ("assuming Nvidia"), and
+the CUDA `aimdo.so` driving XPU weight streaming and buffer lifetimes. The provider also
+pins the base version (`comfy-aimdo 0.5.5`, while ComfyUI's `requirements.txt` asks for
+0.5.6) and rejects a mismatch. `setup_xpu_comfy.sh` now extracts both and installs the base
+version read from the provider's manifest; `--check` prints `aimdo vendor : xpu` when it is
+right.
 
 **Never load the whole 135 GiB H3 partition across many cards at once.** `device_map="balanced"`
 over 16 XPUs wedged three GPUs (`xe … device wedged, needs recovery`) and needed a

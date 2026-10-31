@@ -324,14 +324,22 @@ copy_venv() {
 
 extract_kernel() {
     local sp="$VENV/lib/python3.12/site-packages"
-    # A rerun after a partial install used to be a no-op here, which left the venv
-    # with the kernel but no libdnnl.so.3 forever. Ask the kernel itself instead.
-    if [ "$FORCE" -eq 0 ] && [ -d "$sp/omni_xpu_kernel" ] \
+    # Two co-installable providers come out of the image, and both matter:
+    #   omni_xpu_kernel         -> native int8 / attention kernels
+    #   comfy_aimdo_xpu_runtime -> the XPU implementation of AIMDO (weights streaming,
+    #                              vbar / malloc_graph buffer lifetimes)
+    # Without the second, comfy_aimdo's detect_vendor() finds neither cuda nor rocm,
+    # logs "Could not autodetect AIMDO implementation, assuming Nvidia" and loads the
+    # CUDA aimdo.so on an XPU box. That corrupts the buffer layer the reference-image
+    # path depends on and only surfaces much later, as an assertion inside a torch-xpu
+    # index kernel in a file that has nothing to do with AIMDO. A rerun with just the
+    # kernel present used to skip extraction, so check for both.
+    if [ "$FORCE" -eq 0 ] && [ -d "$sp/omni_xpu_kernel" ] && [ -d "$sp/comfy_aimdo_xpu_runtime" ] \
        && "$PY" -c 'import omni_xpu_kernel as o; raise SystemExit(0 if o.is_available() else 1)' 2>/dev/null; then
-        say "omni_xpu_kernel already installed and loadable — skipping extraction"
+        say "omni_xpu_kernel + comfy_aimdo XPU provider already installed — skipping extraction"
         return
     fi
-    say "extracting omni_xpu_kernel from $XPU_IMAGE"
+    say "extracting omni_xpu_kernel + comfy_aimdo_xpu_runtime from $XPU_IMAGE"
     docker rm -f xpu-setup-probe >/dev/null 2>&1 || true
     docker run -d --name xpu-setup-probe "$XPU_IMAGE" sleep 300 >/dev/null
     # shellcheck disable=SC2064
@@ -339,7 +347,7 @@ extract_kernel() {
 
     local names
     names="$(docker exec xpu-setup-probe bash -lc \
-        "ls $IMAGE_SITE | grep -iE '^omni_xpu_kernel'" 2>/dev/null)"
+        "ls $IMAGE_SITE | grep -iE '^omni_xpu_kernel|^comfy_aimdo_xpu_runtime'" 2>/dev/null)"
     [ -n "$names" ] || die "could not list XPU packages inside $XPU_IMAGE"
     local n
     for n in $names; do
@@ -354,6 +362,20 @@ extract_kernel() {
     say "installing onednn==$ONEDNN_VERSION (provides libdnnl.so.3; the image has metadata only)"
     rm -rf "$sp"/onednn*.dist-info
     uv pip install --python "$PY" "onednn==$ONEDNN_VERSION" 2>&1 | tail -1
+
+    # The AIMDO provider accepts only a narrow window of base versions (0.5.5 in this
+    # image) and rejects the 0.5.6 that ComfyUI's requirements.txt pins. A rejected
+    # provider is silent: AIMDO just loads the CUDA library. Install the pairing the
+    # provider declares rather than trusting the requirements pin.
+    local aimdo_ver
+    aimdo_ver="$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["canonical_distribution"]["compatible_versions"][0])' \
+        "$sp/comfy_aimdo_xpu_runtime/provider.json" 2>/dev/null || true)"
+    if [ -n "$aimdo_ver" ]; then
+        say "installing comfy-aimdo==$aimdo_ver (the version the XPU provider accepts)"
+        uv pip install --python "$PY" "comfy-aimdo==$aimdo_ver" 2>&1 | tail -1
+    else
+        warn "could not read the accepted comfy-aimdo version from the provider manifest"
+    fi
     docker rm -f xpu-setup-probe >/dev/null 2>&1 || true
 }
 
@@ -423,9 +445,109 @@ install_node() {
 }
 
 # --- verification ----------------------------------------------------------
+patch_comfy_nonzero() {
+    # torch-xpu's nonzero() returns wrong indices for many mask lengths on this runtime:
+    # the mask sum is right, the tail of the index list is garbage and unsorted. Boolean
+    # mask *writes* then abort inside the index kernel ("index out of bounds"), and mask
+    # *reads* fail silently, returning the wrong rows. ComfyUI's H3 reference-image path
+    # does three such writes (Qwen3-VL DeepStack inject + the two `_embed_and_pack`
+    # scatters), which is why ref2v died while t2v — no boolean masks — ran fine.
+    # Computing those indices on the CPU is exact and costs nothing: the mask is 1-D bool.
+    if [ ! -d "$COMFY/comfy" ]; then
+        warn "ComfyUI checkout missing at $COMFY — skipping the nonzero patch"
+        return
+    fi
+    say "patching ComfyUI's boolean-mask indexing (torch-xpu nonzero workaround)"
+    "$PY" - "$COMFY" <<'PY' || die "failed to patch ComfyUI's boolean-mask indexing"
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+sentinel = "_cpu_index_workaround"
+llama = root / "comfy" / "text_encoders" / "llama.py"
+model = root / "comfy" / "ldm" / "minimax" / "model.py"
+
+llama_old = """            if deepstack_embeds is not None and i < len(deepstack_embeds):
+                x[visual_pos_masks] = x[visual_pos_masks] + deepstack_embeds[i].to(x)"""
+llama_new = """            if deepstack_embeds is not None and i < len(deepstack_embeds):
+                # %s: boolean-mask indexing goes through nonzero(), which returns wrong
+                # indices for many lengths on this XPU runtime, silently on the read side.
+                _vis_idx = visual_pos_masks[0].cpu().nonzero(as_tuple=True)[0].to(x.device)
+                _vis_add = deepstack_embeds[i].to(x)
+                x.index_copy_(1, _vis_idx, x.index_select(1, _vis_idx) + _vis_add.unsqueeze(0))""" % sentinel
+
+video_old = """            all_video_rows[~img_update] = cond_video_rows
+            all_video_rows[img_update] = video_rows"""
+video_new = """            # %s: CPU-computed indices, see llama.py
+            all_video_rows.index_copy_(0, (~img_update).cpu().nonzero(as_tuple=True)[0].to(device), cond_video_rows)
+            all_video_rows.index_copy_(0, img_update.cpu().nonzero(as_tuple=True)[0].to(device), video_rows)""" % sentinel
+
+audio_old = """            all_audio_rows[~audio_update] = cond_audio_rows
+            all_audio_rows[audio_update] = audio_rows"""
+audio_new = """            # %s: CPU-computed indices, see llama.py
+            all_audio_rows.index_copy_(0, (~audio_update).cpu().nonzero(as_tuple=True)[0].to(device), cond_audio_rows)
+            all_audio_rows.index_copy_(0, audio_update.cpu().nonzero(as_tuple=True)[0].to(device), audio_rows)""" % sentinel
+
+
+def patch(path, pairs):
+    text = path.read_text()
+    if sentinel in text:
+        print(f"  already patched: {path.name}")
+        return
+    for old, new in pairs:
+        if old not in text:
+            raise SystemExit(f"  pattern not found in {path} (ComfyUI changed upstream?)")
+        text = text.replace(old, new, 1)
+    path.write_text(text)
+    print(f"  patched {path.relative_to(root)}")
+
+
+patch(llama, [(llama_old, llama_new)])
+patch(model, [(audio_old, audio_new), (video_old, video_new)])
+PY
+}
+
 verify() {
     say "verifying (this is the part that matters: packages installed but adapters
       not applied looks exactly like 'no speedup')"
+    if grep -q '_cpu_index_workaround' "$COMFY/comfy/text_encoders/llama.py" 2>/dev/null; then
+        say "comfy nonzero patch: applied (ref2v depends on it on this runtime)"
+    else
+        warn "comfy nonzero patch: MISSING — ref2v will abort inside a torch-xpu index kernel"
+    fi
+    # AIMDO has to pick its XPU implementation, not the CUDA one. Probe it in a separate
+    # interpreter: deciding that requires DynamicVRAM on, which installs the allocator
+    # overlay, after which any later allocation in that process is lazily backed and the
+    # rest of this verify dies with "data is not allocated yet".
+    local aimdo_vendor="" aimdo_rc=0
+    aimdo_vendor="$(COMFY_NODE_DIR="$NODE_DIR" PYTHONPATH="$COMFY" AIMDO_XPU_ALLOCATOR_MODE="${AIMDO_XPU_ALLOCATOR_MODE:-global}" \
+        "$PY" - <<'PYAIMDO' 2>/dev/null
+import importlib.util, os, sys
+from pathlib import Path
+sys.argv = [sys.argv[0]]
+try:
+    import comfy.cli_args as cli
+    cli.args.enable_dynamic_vram = True
+except Exception:
+    pass
+import comfy_aimdo.control  # noqa: F401
+node = Path(os.environ["COMFY_NODE_DIR"])
+spec = importlib.util.spec_from_file_location("omnixpu_prestartup", node / "prestartup_script.py")
+mod = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = mod
+spec.loader.exec_module(mod)
+mod.apply_runtime_providers()
+import comfy_aimdo.control as c
+print(c.detect_vendor() or "")
+PYAIMDO
+)" || aimdo_rc=$?
+    if [ "$aimdo_vendor" = "xpu" ]; then
+        say "aimdo vendor   : xpu"
+    else
+        warn "aimdo vendor   : '${aimdo_vendor:-unknown}' (rc=$aimdo_rc) — AIMDO is on the CUDA library.
+      comfy_aimdo_xpu_runtime is missing or rejected; ref2v will corrupt buffers and abort
+      inside a torch-xpu index kernel, and the loss is silent until it does."
+    fi
     PYTHONPATH="$COMFY" "$PY" - "$NODE_DIR" <<'PY'
 import importlib.util, sys
 from pathlib import Path
@@ -438,6 +560,14 @@ spec.loader.exec_module(mod)
 
 result = mod.apply_runtime_providers()
 print("providers      :", result.get("status"), result.get("errors") or "")
+
+# Report whether this runtime's nonzero() is still broken, since the CPU-index patch
+# above only exists because of it. Not a failure: the patch is what makes ref2v work.
+import torch as _torch
+_m = _torch.zeros(176, dtype=_torch.bool, device="xpu")
+_m[7:151] = True
+_nz_ok = _torch.equal(_m.nonzero(as_tuple=True)[0].cpu(), _m.cpu().nonzero(as_tuple=True)[0])
+print("xpu nonzero    :", "correct" if _nz_ok else "BROKEN for len 176 (CPU-index patch required)")
 
 import torch, comfy_kitchen as ck, comfy.ops as ops
 print("torch          :", torch.__version__)
@@ -555,6 +685,7 @@ build_kitchen
 check_kitchen_versions
 build_provider
 install_node
+patch_comfy_nonzero
 verify
 say "done. start ComfyUI with: ./run_xpu_comfy.sh --gpu ${XPU_GPU:-<card>} --port 8288"
 [ "$BENCH" -eq 1 ] && bench
