@@ -171,8 +171,9 @@ preflight() {
         if ! docker info >/dev/null 2>&1; then
             die "cannot reach the docker daemon as $(id -un) (permission denied on
       /var/run/docker.sock?). The scripts call bare \`docker\`, so group membership is
-      what matters, not sudo: \`sudo usermod -aG docker $(id -un)\` and then start a NEW
-      login session (this host has no newgrp/sg unless the \`login\` package is installed)."
+      what matters, not sudo: \`sudo usermod -aG docker $(id -un)\` and then
+      \`exec sg docker\` (sg/newgrp ship in util-linux-extra) or a new login.
+      A terminal tab opened in the same desktop session does not get the group."
         fi
         if ! docker image inspect "$XPU_IMAGE" >/dev/null 2>&1; then
             die "image $XPU_IMAGE not present; run: docker pull $XPU_IMAGE"

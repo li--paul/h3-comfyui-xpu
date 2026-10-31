@@ -111,9 +111,10 @@ else
         die "cannot reach the docker daemon as $(id -un).
       Every script here calls bare \`docker\`, so this is group membership, not sudo:
         sudo usermod -aG docker $(id -un)     # once per user
-        exec newgrp docker                    # in this shell (needs 'login': apt-get install -y login)
-      Re-opening a terminal tab in the same desktop session usually does NOT pick the
-      group up; only a real login (or newgrp/su -) does.
+        exec sg docker                        # in this shell, keeps the cwd
+      (sg/newgrp come from util-linux-extra: apt-get install -y util-linux-extra.
+      Re-opening a terminal tab in the same desktop session does NOT pick the group up;
+      only a new login, sg or su - does.)
       Or skip docker entirely: ./setup_comfyui_env.sh --kernel-from-source"
     fi
     if ! docker image inspect "$XPU_IMAGE" >/dev/null 2>&1; then

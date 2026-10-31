@@ -222,9 +222,10 @@ Each mirrors the official vLLM-Omni XPU Docker build; do not "simplify" them:
 - **`setup_xpu_comfy.sh` needs docker** for its default `KERNEL_MODE=image`: it shells out to
   bare `docker image inspect` / `create` / `cp` / `rm` (never `sudo`), so plain `docker` must
   work for the invoking user — group membership, not root. This host has `docker.io` 29.1.3
-  and `acm` in the `docker` group, but **no `newgrp`/`sg`** (the `login` package is absent), so
-  any shell started before the `usermod` still gets permission denied: start a fresh login
-  session, or skip docker with `--kernel-from-source`. Only file extraction happens — no
+  and `acm` in the `docker` group. `newgrp`/`sg` come from `util-linux-extra` (not
+  `login`, which 26.04 no longer ships them); with that installed, `exec sg docker` gives an
+  existing shell the group, otherwise a fresh login is required — a new terminal tab in the
+  same desktop session does *not* pick it up. Only file extraction happens — no
   `--device /dev/dri`, no Intel container runtime. `setup_comfyui_env.sh` now checks the
   daemon and the image *up front* (it used to fail late, inside `setup_xpu_comfy.sh`, with
   `docker image inspect`'s permission error printed as "image not present"), pulls the image
