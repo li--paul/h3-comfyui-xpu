@@ -752,23 +752,30 @@ receives zero token ids, so `_get_rope_index` calls `torch.cat` on an empty list
 right form field) and the 8-step artifact guard rejects 2-step runs by design, so this
 is inside the pipeline rather than the harness.
 
-**(3) vLLM-Omni ref2va: past the kernel abort, now a mask/feature mismatch.** With the
-`nonzero` workaround from (1) applied inside `vllm_omni` (the H3 encoder does the same four
-masked writes), the index-kernel abort is gone and encoding gets further, then raises:
+**(3) vLLM-Omni ref2va: the same `nonzero` primitive, and then one of ours.** The H3
+encoder and denoise loop do the same masked selects and writes, so `setup_vllm_omni_env.sh`
+now applies the CPU-index rewrite to every one of them (34 hunks across
+`encoder.py`, `minimax_h3_transformer.py`, `denoise_loop.py`, `latent_mask.py` and
+`pipeline_minimax_h3.py`). With that, encoding completes and sampling starts; the
+index-kernel assertion no longer appears.
 
-```
-RuntimeError: The size of tensor a (N) must match the size of tensor b (M)
-  at .../minimax_h3/encoder.py:977 in _deepstack_process
-```
+Two things are worth recording from the iterations, because both looked like product bugs
+and were not:
 
-`N - M == 21` for both reference images tried (1053/1032 at 1376×784, 1045/1024 at
-1024×1024), so it is not a resize or divisibility problem. `visual_pos_masks` is
-`image_mask | video_mask`, while `_get_placeholder_mask` only validates the *image* mask
-against the vision features — so the extra 21 rows are **video placeholder tokens that have
-no video features**, and the image-only DeepStack embeds are then added at the union
-positions. Left unpatched: fixing it means deciding what a ref2va request should carry (why
-21 video placeholders at all), which changes upstream request semantics rather than
-working around a runtime bug.
+- The first shape error (`tensor a (1045)` vs `(1024)` in `_deepstack_process`) came from the
+  rewrite itself: `hidden_states` is `[1, seq, D]`, not `[seq, D]`, so the mask has to be
+  applied along dim 1. The "constant 21-row excess" that suggested missing video
+  placeholders was just the sequence length versus the number of true positions — there is
+  no video mask in a ref2va request at all. The rewrite now picks the dim whose size
+  matches the mask, and the `_masked_feature_guard` hunk stays only as a defensive check.
+- `denoise_loop.py` indexes rows by masks in a dozen places (`v_video[update]`,
+  `video_rows[~update] = cond_anchor`, …). Patching only the encoder moves the abort into
+  the first denoise step, which is why the patch covers the loop as well.
+
+Full 8-step vLLM-Omni numbers on this host are still pending: a 512×288 request had not
+finished its first step within 25 minutes on one card with
+`--enable-distributed-layerwise-offload --dlo-resident-layers 2`, so the single-card
+streaming cost is measured separately before that row is filled in.
 
 **Mode/partition pairing is enforced.** A Ref2VA adapter requested from an `fl2va`
 server returns HTTP 500: *"…is a Ref2VA Turbo artifact; start the server with

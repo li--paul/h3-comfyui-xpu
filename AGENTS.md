@@ -273,12 +273,13 @@ Each mirrors the official vLLM-Omni XPU Docker build; do not "simplify" them:
   `comfy/ldm/minimax/model.py`) to compute indices on the CPU and use
   `index_select`/`index_copy_`. Idempotent and script-owned — never hand-patch `vendor/`.
   Without that patch ref2v dies; with it ref2v is 280 s at 1376×768/8 steps (35 s/step).
-  `setup_vllm_omni_env.sh` applies the same workaround inside `vllm_omni` (the H3 encoder
-  does four of those masked writes); with it vLLM-Omni's ref2va gets past the kernel and
-  then fails on its own bug: `_deepstack_process` gets `image_mask | video_mask` positions
-  but image-only DeepStack embeds, a constant 21-row excess (1053/1032, 1045/1024), i.e.
-  video placeholder tokens with no video features. That one is left alone — fixing it
-  changes upstream request semantics, not a runtime quirk.
+  `setup_vllm_omni_env.sh` applies the same workaround inside `vllm_omni` — 34 hunks across
+  `encoder.py`, `minimax_h3_transformer.py`, `denoise_loop.py`, `latent_mask.py` and
+  `pipeline_minimax_h3.py`, because the denoise loop also indexes rows by mask. Two traps
+  when editing those sites: `hidden_states` in `_deepstack_process` is `[1, seq, D]` (select
+  along dim 1, and pick the dim whose size matches the mask), and patching only the encoder
+  just moves the abort into the first denoise step. With the patch, encoding completes and
+  sampling runs; single-card step time is dominated by streaming the 62 GB BF16 DiT.
 - **vLLM-Omni `t2va` is broken here regardless of prompt**: the encoder receives zero
   token ids (`torch.cat` on an empty list at 1376×768; a ~4.3e9 GiB allocation at
   512×288). The environment itself builds and serves fine (`setup_vllm_omni_env.sh` →
