@@ -697,7 +697,7 @@ vLLM-Omni 0.32.0rc1 built from source into `.venv-omni`. Same prompt, seed 1001.
 | ComfyUI + XPU kernel | t2v | `fl2va_pruned_fp8_scaled` DiT + nvfp4 encoder, 1376×768, 124 f, 8 steps | **300 s** | 37.5 s | 124 frames, AAC 32 kHz, frame mean 82.3–95.2 (std 57.6–65.5) |
 | ComfyUI + XPU kernel | ref2v | `ref2va_pruned_int8_convrot` DiT, same shape | **280 s** | 35 s | 124 frames, AAC 32 kHz, frame mean 106.7–111.6 (std 61) — needs fix (1) |
 | vLLM-Omni, 1 card BF16 + DLO 2 | t2va | `FL2VA/` partition | — | — | aborts (2) |
-| vLLM-Omni, 1 card BF16 + DLO 2 | ref2va | `Ref2VA/` partition | — | — | aborts (1) |
+| vLLM-Omni, 1 card BF16 + DLO 2 | ref2va | `Ref2VA/` partition | — | — | aborts (3) |
 
 Peak VRAM was not captured for these runs.
 
@@ -751,6 +751,24 @@ receives zero token ids, so `_get_rope_index` calls `torch.cat` on an empty list
 512×288 tries to allocate ~4.3e9 GiB. The prompt does reach the server (`prompt` is the
 right form field) and the 8-step artifact guard rejects 2-step runs by design, so this
 is inside the pipeline rather than the harness.
+
+**(3) vLLM-Omni ref2va: past the kernel abort, now a mask/feature mismatch.** With the
+`nonzero` workaround from (1) applied inside `vllm_omni` (the H3 encoder does the same four
+masked writes), the index-kernel abort is gone and encoding gets further, then raises:
+
+```
+RuntimeError: The size of tensor a (N) must match the size of tensor b (M)
+  at .../minimax_h3/encoder.py:977 in _deepstack_process
+```
+
+`N - M == 21` for both reference images tried (1053/1032 at 1376×784, 1045/1024 at
+1024×1024), so it is not a resize or divisibility problem. `visual_pos_masks` is
+`image_mask | video_mask`, while `_get_placeholder_mask` only validates the *image* mask
+against the vision features — so the extra 21 rows are **video placeholder tokens that have
+no video features**, and the image-only DeepStack embeds are then added at the union
+positions. Left unpatched: fixing it means deciding what a ref2va request should carry (why
+21 video placeholders at all), which changes upstream request semantics rather than
+working around a runtime bug.
 
 **Mode/partition pairing is enforced.** A Ref2VA adapter requested from an `fl2va`
 server returns HTTP 500: *"…is a Ref2VA Turbo artifact; start the server with

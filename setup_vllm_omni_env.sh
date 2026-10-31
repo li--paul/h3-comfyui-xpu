@@ -221,6 +221,153 @@ say "syncing $PROJ_DIR into $VENV"
 say "this compiles vllm and vllm-omni from source: 30-60 minutes, slow not hung"
 UV_PROJECT_ENVIRONMENT="$VENV" "$UV_BIN" sync --project "$PROJ_DIR"
 
+# --- torch-xpu boolean-mask workaround --------------------------------------
+# torch-xpu's nonzero() returns the right count but a garbage, unsorted tail for many mask
+# lengths on this runtime (64 fine, 65-1000 wrong, 4096/41042 fine). The H3 text encoder
+# fills its image placeholders with masked_scatter and injects the DeepStack features with
+# masked writes, so a ref2va request aborts inside the index kernel
+# (`Indexing.h:622 ... index out of bounds`) with no Python frame to point at. Resolve
+# those index lists on the CPU instead: the masks are boolean, so it costs nothing.
+# Idempotent, and it lives here rather than in the venv by hand so a rebuild keeps it.
+patch_h3_masks() {
+    local root="$VENV/lib/python3.12/site-packages/vllm_omni/diffusion/models/minimax_h3"
+    if [ ! -f "$root/encoder.py" ]; then
+        warn "vllm_omni's minimax_h3 package not found under $root — skipping the mask patch"
+        return
+    fi
+    say "patching vllm_omni's H3 boolean-mask indexing (torch-xpu nonzero workaround)"
+    "$VENV/bin/python" - "$root" <<'PYMASK' || die "failed to patch vllm_omni's H3 masking"
+import sys
+from pathlib import Path
+
+HELPER = '''"""CPU-computed index lists for boolean masks.
+
+torch-xpu's nonzero() returns the right count but a garbage, unsorted tail for many mask
+lengths on this runtime (64 fine, 65-1000 wrong, 4096/41042 fine). Boolean-mask writes
+then abort inside the index kernel, and boolean-mask reads silently return the wrong
+rows. A boolean mask is tiny, so resolving its index list on the CPU costs nothing.
+"""
+
+from __future__ import annotations
+
+import torch
+
+
+def idx(mask: torch.Tensor, device: torch.device | None = None) -> torch.Tensor:
+    """Sorted index list of a boolean mask, computed on the CPU when it lives on XPU."""
+    flat = mask.reshape(-1) if mask.dim() > 1 else mask
+    if flat.device.type != "xpu":
+        return flat.nonzero(as_tuple=True)[0]
+    return flat.cpu().nonzero(as_tuple=True)[0].to(device or mask.device)
+
+
+def select(t: torch.Tensor, mask: torch.Tensor, dim: int = 0) -> torch.Tensor:
+    """Equivalent of t[mask] for a boolean mask along `dim`."""
+    if t.device.type != "xpu" or mask.dtype is not torch.bool:
+        return t[mask]
+    return t.index_select(dim, idx(mask, t.device))
+
+
+def assign(dst: torch.Tensor, mask: torch.Tensor, values: torch.Tensor, dim: int = 0) -> None:
+    """Equivalent of dst[mask] = values for a boolean mask along `dim`, in place."""
+    if dst.device.type != "xpu" or mask.dtype is not torch.bool:
+        dst[mask] = values
+        return
+    dst.index_copy_(dim, idx(mask, dst.device), values.to(dst.dtype))
+
+
+def masked_scatter(src: torch.Tensor, mask: torch.Tensor, values: torch.Tensor) -> torch.Tensor:
+    """Equivalent of src.masked_scatter(mask, values) for an element-wise mask."""
+    if src.device.type != "xpu" or mask.dtype is not torch.bool:
+        return src.masked_scatter(mask, values)
+    flat = idx(mask, src.device)
+    out = src.reshape(-1).clone()
+    out.index_copy_(0, flat, values.reshape(-1).to(out.dtype))
+    return out.view(src.shape)
+'''
+
+SENTINEL = "_xpu_masks_cpu_index"
+root = Path(sys.argv[1])
+
+PATCHES = [
+    ("encoder.py",
+     "            inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)",
+     "            # " + SENTINEL + "\n"
+     "            inputs_embeds = _xpu_masks.masked_scatter(inputs_embeds, image_mask, image_embeds)"),
+    ("encoder.py",
+     "            inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)",
+     "            # " + SENTINEL + "\n"
+     "            inputs_embeds = _xpu_masks.masked_scatter(inputs_embeds, video_mask, video_embeds)"),
+    ("encoder.py",
+     "            image_mask_joint = image_mask[visual_pos_masks]",
+     "            # " + SENTINEL + "\n"
+     "            image_mask_joint = _xpu_masks.select(image_mask, visual_pos_masks)"),
+    ("encoder.py",
+     "            video_mask_joint = video_mask[visual_pos_masks]",
+     "            # " + SENTINEL + "\n"
+     "            video_mask_joint = _xpu_masks.select(video_mask, visual_pos_masks)"),
+    ("encoder.py",
+     "                embed_joint[image_mask_joint, :] = img_embed",
+     "                # " + SENTINEL + "\n"
+     "                _xpu_masks.assign(embed_joint, image_mask_joint, img_embed)"),
+    ("encoder.py",
+     "                embed_joint[video_mask_joint, :] = vid_embed",
+     "                # " + SENTINEL + "\n"
+     "                _xpu_masks.assign(embed_joint, video_mask_joint, vid_embed)"),
+    ("encoder.py",
+     "        hidden_states[visual_pos_masks, :] = hidden_states[visual_pos_masks, :] + visual_embeds",
+     "        # " + SENTINEL + "\n"
+     "        _ds_idx = _xpu_masks.idx(visual_pos_masks, hidden_states.device)\n"
+     "        hidden_states.index_copy_(0, _ds_idx,\n"
+     "                                  hidden_states.index_select(0, _ds_idx) + visual_embeds)"),
+    ("minimax_h3_transformer.py",
+     "        img_global_pos = img_pos[img_mask]",
+     "        # " + SENTINEL + "\n        img_global_pos = _xpu_masks.select(img_pos, img_mask)"),
+    ("minimax_h3_transformer.py",
+     "        audio_global_pos = audio_pos[audio_mask]",
+     "        # " + SENTINEL + "\n        audio_global_pos = _xpu_masks.select(audio_pos, audio_mask)"),
+    ("minimax_h3_transformer.py",
+     "            text_pos[text_mask] - local_start,",
+     "            # " + SENTINEL + "\n"
+     "            _xpu_masks.select(text_pos, text_mask) - local_start,"),
+    ("minimax_h3_transformer.py",
+     "            torch.nonzero(text_mask, as_tuple=False).view(-1),",
+     "            _xpu_masks.idx(text_mask, text_pos.device),  # " + SENTINEL),
+    ("denoise_loop.py",
+     "            target_positions = positions[update_mask]",
+     "            # " + SENTINEL + "\n"
+     "            target_positions = _xpu_masks.select(positions, update_mask)"),
+]
+IMPORT_OLD = "import torch\n"
+IMPORT_NEW = "import torch\n\nfrom . import _xpu_masks  # " + SENTINEL + "\n"
+
+by_file = {}
+for name, old, new in PATCHES:
+    by_file.setdefault(name, []).append((old, new))
+
+(root / "_xpu_masks.py").write_text(HELPER)
+
+for name, pairs in by_file.items():
+    path = root / name
+    text = path.read_text()
+    if SENTINEL in text:
+        print(f"  already patched: {name}")
+        continue
+    for old, new in pairs:
+        if old not in text:
+            raise SystemExit(f"  pattern not found in {name}: {old.strip()[:70]!r}")
+        text = text.replace(old, new, 1)
+    if IMPORT_NEW not in text:
+        if IMPORT_OLD not in text:
+            raise SystemExit(f"  import anchor not found in {name}")
+        text = text.replace(IMPORT_OLD, IMPORT_NEW, 1)
+    path.write_text(text)
+    print(f"  patched {name}")
+PYMASK
+}
+
+patch_h3_masks
+
 # --- weights ----------------------------------------------------------------
 if [ "$DOWNLOAD" -eq 1 ]; then
     say "downloading weights (~270 GB for both partitions)"

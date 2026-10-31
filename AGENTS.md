@@ -273,7 +273,12 @@ Each mirrors the official vLLM-Omni XPU Docker build; do not "simplify" them:
   `comfy/ldm/minimax/model.py`) to compute indices on the CPU and use
   `index_select`/`index_copy_`. Idempotent and script-owned — never hand-patch `vendor/`.
   Without that patch ref2v dies; with it ref2v is 280 s at 1376×768/8 steps (35 s/step).
-  vLLM-Omni's ref2va hits the same primitive from its own code and is still unpatched.
+  `setup_vllm_omni_env.sh` applies the same workaround inside `vllm_omni` (the H3 encoder
+  does four of those masked writes); with it vLLM-Omni's ref2va gets past the kernel and
+  then fails on its own bug: `_deepstack_process` gets `image_mask | video_mask` positions
+  but image-only DeepStack embeds, a constant 21-row excess (1053/1032, 1045/1024), i.e.
+  video placeholder tokens with no video features. That one is left alone — fixing it
+  changes upstream request semantics, not a runtime quirk.
 - **vLLM-Omni `t2va` is broken here regardless of prompt**: the encoder receives zero
   token ids (`torch.cat` on an empty list at 1376×768; a ~4.3e9 GiB allocation at
   512×288). The environment itself builds and serves fine (`setup_vllm_omni_env.sh` →
