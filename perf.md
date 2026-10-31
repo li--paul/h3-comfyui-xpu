@@ -773,7 +773,8 @@ and were not:
   the first denoise step, which is why the patch covers the loop as well.
 
 **Why single-card vLLM-Omni is not usable on this host.** A 512×288 ref2va request had not
-finished its first denoising step after 25 minutes with
+finished its first denoising step after 22 minutes (22:42 runtime, tqdm still `0/8`) on a
+second attempt, and after 25 minutes on the first, with
 `--enable-distributed-layerwise-offload --dlo-resident-layers 2`. The reason is memory
 capacity, not a bug: the worker reached **98.9 GiB RSS** within two minutes while the box
 had **183 GiB RAM, 1 GiB free and only 41 GiB of page cache** — the 135 GiB FL2VA partition
