@@ -12,11 +12,17 @@
 #   * --async-offload 2 --reserve-vram 2
 #                               the offload policy h3-test.sh uses; changing it
 #                               makes timings incomparable
+#   * extra_model_paths         the weights are not a flag: ComfyUI reads its own
+#                               extra_model_paths.yaml. Pass --models (or set
+#                               H3_MODELS) to get a per-run mapping instead, so
+#                               the choice is per run rather than "whoever wrote
+#                               the global yaml last".
 #
 # Usage:
 #   ./run_xpu_comfy.sh                          # card 16, port 8288
 #   ./run_xpu_comfy.sh --gpu 17 --port 8388
 #   ./run_xpu_comfy.sh --out h3_output/mytest -- --verbose
+#   ./run_xpu_comfy.sh --models /data/ComfyUI-MiniMax-H3
 #   ./run_xpu_comfy.sh --build-kernel           # compile the XPU kernel first
 #
 # Before launching it probes omni_xpu_kernel (target, torch minor, cute, and the
@@ -36,6 +42,9 @@ OUT="$ROOT/h3_output/xpu_comfy"
 IN_DIR="$ROOT/h3_input/assets"
 EXTRA=()
 BUILD_KERNEL="${XPU_KERNEL_AUTOBUILD:-0}"
+# Empty means "use ComfyUI's own extra_model_paths.yaml". Set it (or pass
+# --models) to get a per-run mapping instead, see the note above exec.
+H3_MODELS="${H3_MODELS:-}"
 
 say()  { printf '\033[1;36m[xpu-comfy]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[xpu-comfy] %s\033[0m\n' "$*" >&2; exit 1; }
@@ -45,9 +54,10 @@ while [ $# -gt 0 ]; do
         --gpu)  GPU="$2"; shift 2 ;;
         --port) PORT="$2"; shift 2 ;;
         --out)  OUT="$2"; shift 2 ;;
+        --models) H3_MODELS="$2"; shift 2 ;;
         --build-kernel) BUILD_KERNEL=1; shift ;;
         --)     shift; EXTRA=("$@"); break ;;
-        -h|--help) sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "unknown option: $1 (use -- to pass args to ComfyUI)" ;;
     esac
 done
@@ -77,6 +87,32 @@ if (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
 fi
 
 mkdir -p "$OUT"
+
+# --- model mapping ----------------------------------------------------------
+# ComfyUI reads extra_model_paths only at startup, and main.py loads its own
+# extra_model_paths.yaml BEFORE any --extra-model-paths-config, appending search
+# paths as it goes. A plain override file would therefore be searched *after* the
+# global one and lose to any same-named checkpoint. `is_default: true` is what
+# puts these paths at the front: folder_paths.add_model_folder_path inserts at
+# position 0 when that flag is set, otherwise it appends.
+MODEL_ARGS=()
+if [ -n "$H3_MODELS" ]; then
+    [ -d "$H3_MODELS" ] || die "H3_MODELS is not a directory: $H3_MODELS"
+    H3_MODELS="$(cd "$H3_MODELS" && pwd)"
+    MODEL_YAML="$OUT/.extra_model_paths.yaml"
+    cat > "$MODEL_YAML" <<EOF
+h3:
+    is_default: true
+    base_path: $H3_MODELS/
+    diffusion_models: diffusion_models/
+    text_encoders: text_encoders/
+    clip: text_encoders/
+    vae: vae/
+    loras: loras/
+EOF
+    MODEL_ARGS=(--extra-model-paths-config "$MODEL_YAML")
+    say "models  : $H3_MODELS (per-run mapping, not the global extra_model_paths.yaml)"
+fi
 
 # --- XPU kernel gate --------------------------------------------------------
 # A missing or mismatched omni_xpu_kernel does NOT raise: every adapter quietly
@@ -141,4 +177,5 @@ exec env ZE_AFFINITY_MASK="$GPU" "$VENV/bin/python" "$COMFY/main.py" \
     --input-directory "$IN_DIR" \
     --output-directory "$OUT" \
     --async-offload 2 --reserve-vram 2 \
+    "${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}" \
     "${EXTRA[@]+"${EXTRA[@]}"}"

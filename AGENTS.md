@@ -184,6 +184,14 @@ ComfyUI (`vendor/ComfyUI`) on one card and writes to `h3_output/`.
   - `jzl_manager.json` — seed for the node's persisted settings
 - Weights come from `~/work/models/ComfyUI-MiniMax-H3` via a generated
   `vendor/ComfyUI/extra_model_paths.yaml` (`H3_MODELS=` to override).
+- That yaml is the only way ComfyUI finds H3 weights, and **two scripts write
+  it**: `h3-test.sh` (from `H3_MODELS`) and `setup_comfyui_env.sh` (from
+  `MODELS_DIR`, now only when that is given explicitly or no file exists). For
+  the generation path prefer `./gen_video.sh <proj> --models PATH` (or
+  `H3_MODELS=`): it writes a per-run mapping and passes
+  `--extra-model-paths-config`, so nothing global is involved. The mapping needs
+  `is_default: true` or the paths land behind the global ones and a same-named
+  checkpoint there wins silently.
 - The script picks `minimax_h3_video_vae_bf16` or `_fp16`, whichever exists, and
   rewrites the workflow's `VAELoader` + `manager_settings` to match.
 - Env overrides: `PORT`, `TIMEOUT`, `H3_INPUT`, `H3_MODELS`, `STEPS`, `DURATION`, `SEED`.

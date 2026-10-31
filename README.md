@@ -212,6 +212,66 @@ both accepts torch 2.14 and still bundles Sol-Attn. Two ways to get that wrong,
 both silent: an older revision fails to build, a newer one drops Sol-Attn into a
 separate wheel and `--sol` quietly stops being sparse.
 
+### Where the ComfyUI weights are specified
+
+**The generation path has no weights flag of its own.** ComfyUI resolves every
+checkpoint through `extra_model_paths.yaml` at startup, so whatever that file says
+is what gets loaded — point it at the wrong directory and each node fails to find
+its checkpoint with no hint that a path was the problem.
+
+`run_xpu_comfy.sh` and `gen_video.sh` therefore take `--models PATH` (or
+`H3_MODELS=PATH`), which writes a **per-run** mapping to
+`<out>/.extra_model_paths.yaml` and hands it to ComfyUI with
+`--extra-model-paths-config`. Nothing global is touched, so the choice is per run
+rather than "whoever wrote `extra_model_paths.yaml` last".
+
+```bash
+./gen_video.sh proj/ --models /data/ComfyUI-MiniMax-H3
+H3_MODELS=/data/ComfyUI-MiniMax-H3 ./run_xpu_comfy.sh --gpu 16
+```
+
+Without either, the `base_path` in `vendor/ComfyUI/extra_model_paths.yaml` is
+used. `gen_video.sh` checks the five files the selected mode needs *before* it
+starts a server, and fails with the full paths instead of letting ComfyUI report
+"value not in list" minutes later.
+
+The generated mapping carries `is_default: true`, and that line is load-bearing.
+`main.py` loads its own `extra_model_paths.yaml` **before** any
+`--extra-model-paths-config`, and `folder_paths.add_model_folder_path` *appends*
+by default — so without the flag the per-run paths land last, behind the global
+ones, and a same-named checkpoint there silently wins. Measured search order for
+`diffusion_models`:
+
+| mapping | order |
+|---|---|
+| global only | `models/unet`, `models/diffusion_models`, `<global base_path>` |
+| per-run **without** `is_default` | …the same…, `<per-run base_path>` (last) |
+| per-run **with** `is_default` | `<per-run base_path>`, `models/unet`, `models/diffusion_models`, `<global base_path>` |
+
+The directory must hold these exact filenames — `comfyui_h3_gen.py` hardcodes
+them, so a different name is a code change, not a config change:
+
+| used by | file |
+|---|---|
+| t2v DiT | `diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors` |
+| ref2v DiT | `diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors` |
+| text encoder | `text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors` |
+| video VAE | `vae/minimax_h3_video_vae_fp16.safetensors` |
+| audio VAE | `vae/minimax_h3_audio_vae_fp32.safetensors` |
+| t2v LoRA | `loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors` |
+| ref2v LoRA | `loras/minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors` |
+
+> **`extra_model_paths.yaml` has two writers.** `h3-test.sh` writes it from
+> `H3_MODELS`; `setup_comfyui_env.sh` writes it from `MODELS_DIR`. The latter now
+> writes only when `MODELS_DIR` is given explicitly or no file exists yet, so a
+> working install is no longer repointed at `<repo>/models/comfyui-h3` by
+> `--skip-models`. `h3-test.sh` still overwrites it — use `--models` if you would
+> rather not depend on that file at all.
+
+The vLLM-Omni path differs in both respects: `MODEL_ROOT` and `LORA_DIR` are real
+environment variables, and it reads Diffusers-layout directories (`FL2VA/`,
+`Ref2VA/`) whose LoRAs must **not** carry the `_comfyui_` suffix.
+
 ### MiniMax-H3 video generation
 
 `h3-test.sh` runs one H3 shot on a single card and writes to `h3_output/`:
@@ -279,6 +339,12 @@ layout for either:
 Both default to 720p, 5 seconds (1376x768 / 124 frames @ 24 fps), 8 steps with
 the turbo adapter, seed 1001, and verify the artefact afterwards (size, frame
 count, audio track) rather than trusting the HTTP status.
+
+> Weights are not a flag in ComfyUI: `gen_video.sh` takes `--models PATH`
+> (`H3_MODELS=`), which writes a per-run mapping instead of relying on
+> `vendor/ComfyUI/extra_model_paths.yaml` — see
+> [Where the ComfyUI weights are specified](#where-the-comfyui-weights-are-specified).
+> The vLLM-Omni entry point takes `MODEL_ROOT` and `LORA_DIR` directly.
 
 Measured on one Arc Pro B60, same shot and seed:
 

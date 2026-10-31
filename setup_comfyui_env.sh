@@ -164,7 +164,14 @@ else
 fi
 
 # --- point ComfyUI at the weights ------------------------------------------
-cat > "$COMFY/extra_model_paths.yaml" <<EOF
+# Write only when the caller named a directory, or when there is nothing there
+# yet. ComfyUI reads a single extra_model_paths.yaml and every writer replaces
+# the previous one -- h3-test.sh writes the same file from H3_MODELS -- so an
+# unconditional write here would repoint a working install at
+# <repo>/models/comfyui-h3 and break the next gen_video.sh run.
+MODEL_YAML="$COMFY/extra_model_paths.yaml"
+if [ -n "${MODELS_DIR:-}" ] || [ ! -f "$MODEL_YAML" ]; then
+    cat > "$MODEL_YAML" <<EOF
 h3:
     base_path: $MODELS/
     diffusion_models: diffusion_models/
@@ -173,7 +180,12 @@ h3:
     vae: vae/
     loras: loras/
 EOF
-say "wrote $COMFY/extra_model_paths.yaml"
+    say "wrote $MODEL_YAML (base_path: $MODELS/)"
+else
+    say "keeping the existing $MODEL_YAML"
+    say "  base_path: $(sed -n 's/^[[:space:]]*base_path:[[:space:]]*//p' "$MODEL_YAML" | head -1)"
+    say "  pass MODELS_DIR=... to repoint it, or use gen_video.sh --models per run"
+fi
 
 verify
 say "done. generate with: ./gen_video.sh <project-dir>"

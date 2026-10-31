@@ -10,6 +10,13 @@
 #   ./gen_video.sh myproject/
 #   ./gen_video.sh myproject/ --mode ref2v --sol --steps 8
 #   ./gen_video.sh myproject/ --restart --keep-server
+#   ./gen_video.sh myproject/ --models /data/ComfyUI-MiniMax-H3
+#
+# Weights are not a flag in ComfyUI itself: it resolves every checkpoint through
+# extra_model_paths.yaml at startup. --models (or H3_MODELS=) writes a per-run
+# mapping for this launch instead of depending on whoever wrote the global file
+# last. Without either, the base_path in vendor/ComfyUI/extra_model_paths.yaml is
+# used. The five files this mode needs are checked before a server is started.
 #
 # Reference images are pushed through POST /upload/image, so the ComfyUI server does
 # not have to be restarted (or its --input-directory changed) when you switch projects.
@@ -33,12 +40,15 @@ HEIGHT=768
 LENGTH=124
 FPS=24
 PROJECT=""
+# Empty means "resolve the weights through ComfyUI's own extra_model_paths.yaml".
+# Set it (or pass --models) to use a directory without touching that file.
+H3_MODELS="${H3_MODELS:-}"
 
 say()  { printf '\033[1;36m[gen]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[gen] %s\033[0m\n' "$*" >&2; }
 die()  { printf '\033[1;31m[gen] %s\033[0m\n' "$*" >&2; exit 1; }
 
-usage() { sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -53,6 +63,7 @@ while [ $# -gt 0 ]; do
         --keep-server) KEEP_SERVER=1; shift ;;
         --width)    WIDTH="$2"; shift 2 ;;
         --height)   HEIGHT="$2"; shift 2 ;;
+        --models)   H3_MODELS="$2"; shift 2 ;;
         -h|--help)  usage; exit 0 ;;
         -*)         die "unknown option: $1" ;;
         *)          PROJECT="$1"; shift ;;
@@ -91,6 +102,50 @@ say "project : $PROJECT"
 say "mode    : $MODE (${#IMAGES[@]} reference image(s))"
 say "output  : $OUT_DIR"
 
+# --- weights ----------------------------------------------------------------
+# The generation path takes no model path of its own: ComfyUI resolves every
+# checkpoint through extra_model_paths at startup, so a wrong mapping only shows
+# up as "value not in list" minutes into a run. Resolve the root here and check
+# the exact files this mode needs before starting a server.
+MODELS_ROOT="$H3_MODELS"
+if [ -z "$MODELS_ROOT" ] && [ -f "$COMFY/extra_model_paths.yaml" ]; then
+    MODELS_ROOT="$(sed -n 's/^[[:space:]]*base_path:[[:space:]]*//p' \
+        "$COMFY/extra_model_paths.yaml" | head -1 | sed 's:/*$::')"
+fi
+[ -n "$MODELS_ROOT" ] || die "no weights path.
+      Set H3_MODELS=/path (or --models /path), or write a base_path into
+      $COMFY/extra_model_paths.yaml. ComfyUI has no H3 weights in its own tree."
+[ -d "$MODELS_ROOT" ] || die "weights directory does not exist: $MODELS_ROOT
+      (from H3_MODELS/--models, or the base_path in $COMFY/extra_model_paths.yaml)"
+
+REQUIRED=(
+    "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
+    "vae/minimax_h3_video_vae_fp16.safetensors"
+    "vae/minimax_h3_audio_vae_fp32.safetensors"
+)
+if [ "$MODE" = t2v ]; then
+    REQUIRED+=(
+        "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors"
+        "loras/minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
+    )
+else
+    REQUIRED+=(
+        "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors"
+        "loras/minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors"
+    )
+fi
+MISSING=()
+for f in "${REQUIRED[@]}"; do
+    [ -f "$MODELS_ROOT/$f" ] || MISSING+=("$MODELS_ROOT/$f")
+done
+if [ "${#MISSING[@]}" -gt 0 ]; then
+    printf '\033[1;31m[gen]\033[0m %d weight file(s) missing for mode %s under %s:\n' \
+        "${#MISSING[@]}" "$MODE" "$MODELS_ROOT" >&2
+    printf '      %s\n' "${MISSING[@]}" >&2
+    die "point H3_MODELS/--models at a complete weights directory"
+fi
+say "weights : $MODELS_ROOT (${#REQUIRED[@]} files for $MODE)"
+
 # --- server -----------------------------------------------------------------
 port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; }
 
@@ -102,7 +157,9 @@ fi
 
 if ! port_busy; then
     say "starting ComfyUI on XPU $GPU (port $PORT)"
-    ( "$ROOT/run_xpu_comfy.sh" --gpu "$GPU" --port "$PORT" --out "$OUT_DIR" \
+    START_ARGS=(--gpu "$GPU" --port "$PORT" --out "$OUT_DIR")
+    if [ -n "$H3_MODELS" ]; then START_ARGS+=(--models "$H3_MODELS"); fi
+    ( "$ROOT/run_xpu_comfy.sh" "${START_ARGS[@]}" \
         > "$OUT_DIR/comfyui.log" 2>&1 & )
     for i in $(seq 1 60); do
         curl -sf -m 3 "http://127.0.0.1:$PORT/system_stats" >/dev/null 2>&1 && break
@@ -113,6 +170,10 @@ if ! port_busy; then
     say "server ready"
 else
     say "reusing the server already on port $PORT"
+    if [ -n "$H3_MODELS" ]; then
+        warn "H3_MODELS is ignored: the running server read its mapping at startup."
+        warn "Re-run with --restart to make it use $H3_MODELS."
+    fi
 fi
 
 # --- upload reference images ------------------------------------------------
