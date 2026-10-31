@@ -772,10 +772,23 @@ and were not:
   `video_rows[~update] = cond_anchor`, …). Patching only the encoder moves the abort into
   the first denoise step, which is why the patch covers the loop as well.
 
-Full 8-step vLLM-Omni numbers on this host are still pending: a 512×288 request had not
-finished its first step within 25 minutes on one card with
-`--enable-distributed-layerwise-offload --dlo-resident-layers 2`, so the single-card
-streaming cost is measured separately before that row is filled in.
+**Why single-card vLLM-Omni is not usable on this host.** A 512×288 ref2va request had not
+finished its first denoising step after 25 minutes with
+`--enable-distributed-layerwise-offload --dlo-resident-layers 2`. The reason is memory
+capacity, not a bug: the worker reached **98.9 GiB RSS** within two minutes while the box
+had **183 GiB RAM, 1 GiB free and only 41 GiB of page cache** — the 135 GiB FL2VA partition
+(plus the 62 GiB text encoder) cannot stay cached, so every step re-reads weights from
+NVMe. The benchmark host for the tables above had 2 TB of RAM. ComfyUI has no such problem
+because its pruned `int8_convrot` DiT is 21 GB and stays resident, which is why the same
+class of shot costs 280 s there. Treat multi-GPU (TP2 + 12 resident layers) or a
+large-memory host as the requirement for vLLM-Omni; on one card of this box it is
+measurable but not practical.
+
+`--profile smoke` (2 steps, no LoRA, 1024×576) does not work here either: it fails in
+`pipeline_minimax_h3.py` with `value tensor of shape [1024, 96] cannot be broadcast to
+indexing result of shape [0, 96]`, i.e. the conditioning branch it builds has an empty
+update mask. That is independent of the workarounds above (the 8-step turbo path passes
+that point and reaches sampling).
 
 **Mode/partition pairing is enforced.** A Ref2VA adapter requested from an `fl2va`
 server returns HTTP 500: *"…is a Ref2VA Turbo artifact; start the server with
