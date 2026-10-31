@@ -15,8 +15,10 @@
 #   ./setup_comfyui_env.sh                 # full install
 #   ./setup_comfyui_env.sh --skip-models   # env only, reuse an existing model dir
 #   ./setup_comfyui_env.sh --check         # verify only
+#   ./setup_comfyui_env.sh --kernel-from-source   # no docker: compile the kernel (~30-90 min)
+#   ./setup_comfyui_env.sh --no-pull       # never pull the kernel image, fail if absent
 #
-# Environment: COMFY_VENV, MODELS_DIR, COMFYUI_REF, PYTHON_BIN, UV_BIN.
+# Environment: COMFY_VENV, MODELS_DIR, COMFYUI_REF, PYTHON_BIN, UV_BIN, XPU_IMAGE.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,9 +36,13 @@ TORCH_XPU_INDEX="https://download.pytorch.org/whl/xpu"
 PYPI_INDEX="https://pypi.org/simple"
 HF_REPO="Comfy-Org/MiniMax-H3"
 LORA_REPO="lightx2v/Minimax-h3-Turbo"
+# Must match setup_xpu_comfy.sh's default (it has the same variable, same value).
+XPU_IMAGE="${XPU_IMAGE:-intel/llm-scaler-omni:0.2.0-b2}"
 
 SKIP_MODELS=0
 MODE=install
+KERNEL_SRC=0
+NO_PULL=0
 
 say()  { printf '\033[1;36m[comfy-setup]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[comfy-setup] %s\033[0m\n' "$*" >&2; }
@@ -46,7 +52,9 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --skip-models) SKIP_MODELS=1; shift ;;
         --check) MODE=check; shift ;;
-        -h|--help) sed -n '2,22p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --kernel-from-source) KERNEL_SRC=1; shift ;;
+        --no-pull) NO_PULL=1; shift ;;
+        -h|--help) awk 'NR>1 { if ($0 !~ /^#/) exit; sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) die "unknown option: $1" ;;
     esac
 done
@@ -85,7 +93,36 @@ fi
 command -v "$UV_BIN" >/dev/null || die "uv is required"
 command -v git >/dev/null || die "git is required"
 command -v curl >/dev/null || die "curl is required"
-command -v docker >/dev/null || die "docker is required (the XPU kernel wheel comes from the image)"
+# The XPU kernel normally comes out of a docker image. "docker missing", "daemon
+# unreachable" and "image never pulled" all used to surface much later inside
+# setup_xpu_comfy.sh — after ComfyUI had been cloned and its requirements installed —
+# with the permission error reported as "image not present". Resolve all three here,
+# before any heavy work.
+KERNEL_ARGS=()
+if [ "$KERNEL_SRC" -eq 1 ]; then
+    KERNEL_ARGS+=(--kernel-from-source)
+    say "kernel: building from source (no docker needed, needs oneAPI icpx)"
+else
+    command -v docker >/dev/null \
+        || die "docker is required: the XPU kernel wheel is extracted from $XPU_IMAGE.
+      Install it (sudo apt-get install -y docker.io), or skip docker entirely:
+        ./setup_comfyui_env.sh --kernel-from-source   # needs icpx, ~30-90 min"
+    if ! docker info >/dev/null 2>&1; then
+        die "cannot reach the docker daemon as $(id -un).
+      Every script here calls bare \`docker\`, so this is group membership, not sudo:
+        sudo usermod -aG docker $(id -un)     # once per user
+        exec newgrp docker                    # in this shell (needs 'login': apt-get install -y login)
+      Re-opening a terminal tab in the same desktop session usually does NOT pick the
+      group up; only a real login (or newgrp/su -) does.
+      Or skip docker entirely: ./setup_comfyui_env.sh --kernel-from-source"
+    fi
+    if ! docker image inspect "$XPU_IMAGE" >/dev/null 2>&1; then
+        [ "$NO_PULL" -eq 0 ] \
+            || die "image $XPU_IMAGE is absent and --no-pull was given: docker pull $XPU_IMAGE"
+        say "pulling $XPU_IMAGE (7.2 GB compressed, one-off; --no-pull to skip)"
+        docker pull "$XPU_IMAGE" || die "docker pull $XPU_IMAGE failed"
+    fi
+fi
 command -v ffmpeg >/dev/null || warn "ffmpeg not found; mp4 muxing may fail"
 command -v "$PYTHON_BIN" >/dev/null || die "$PYTHON_BIN not found"
 
@@ -105,6 +142,13 @@ else
     say "reusing $VENV"
 fi
 PY="$VENV/bin/python"
+
+# setvars.sh in ~/.bashrc exports oneAPI 2026.2's lib dir, and that libur_loader.so.0
+# outranks the venv's own (LD_LIBRARY_PATH beats DT_RUNPATH=$ORIGIN) while no longer
+# exporting `urKernelSetArgLocal@LIBUR_LOADER_0.12` -- which is exactly what
+# intel-sycl-rt's libsycl.so.9 needs. Restrict the search to the venv, as
+# run_vllm_tp.sh already does, or every torch import dies with an ImportError.
+export LD_LIBRARY_PATH="$VENV/lib"
 
 have_torch="$("$PY" -c 'import torch; print(torch.__version__)' 2>/dev/null | tail -1 || true)"
 if [ "$have_torch" = "${TORCH_VERSION}+xpu" ]; then
@@ -139,7 +183,8 @@ say "installing ComfyUI requirements"
 
 # --- Intel XPU kernel stack (single implementation lives in setup_xpu_comfy.sh) ---
 say "installing the XPU kernel stack in place (omni_xpu_kernel + Kitchen xpu provider + OmniXPU)"
-XPU_VENV="$VENV" XPU_SRC_VENV="$VENV" XPU_NO_COPY=1 "$ROOT/setup_xpu_comfy.sh"
+XPU_VENV="$VENV" XPU_SRC_VENV="$VENV" XPU_NO_COPY=1 \
+    "$ROOT/setup_xpu_comfy.sh" "${KERNEL_ARGS[@]+"${KERNEL_ARGS[@]}"}"
 
 # --- models -----------------------------------------------------------------
 if [ "$SKIP_MODELS" -eq 1 ]; then

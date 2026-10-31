@@ -35,6 +35,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VENV="${XPU_VENV:-$ROOT/.venv-xpu}"
+# ~/.bashrc sources oneAPI setvars, whose libur_loader.so.0 then outranks the venv's
+# own (LD_LIBRARY_PATH beats DT_RUNPATH=$ORIGIN) and no longer exports
+# `urKernelSetArgLocal@LIBUR_LOADER_0.12` that intel-sycl-rt's libsycl.so.9 needs —
+# torch fails to import. Keep the loader search inside the venv (see run_vllm_tp.sh).
+export LD_LIBRARY_PATH="$VENV/lib"
 COMFY="$ROOT/vendor/ComfyUI"
 GPU="${XPU_GPU:-16}"
 PORT="${XPU_PORT:-8288}"

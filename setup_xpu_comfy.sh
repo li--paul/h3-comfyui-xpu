@@ -116,6 +116,12 @@ KITCHEN_DIR="$VENDOR/comfy-kitchen-xpu"
 NODE_DIR="$VENDOR/ComfyUI-OmniXPU"
 COMFY="$VENDOR/ComfyUI"
 PY="$VENV/bin/python"
+# ~/.bashrc sources oneAPI setvars, and its libur_loader.so.0 outranks the venv's own
+# (LD_LIBRARY_PATH beats DT_RUNPATH=$ORIGIN) while no longer exporting
+# `urKernelSetArgLocal@LIBUR_LOADER_0.12` that intel-sycl-rt's libsycl.so.9 needs --
+# every torch probe below would die importing torch. Scope the loader to the venv.
+# The source-build subshell re-sources setvars for icpx and re-prepends the venv.
+export LD_LIBRARY_PATH="$VENV/lib"
 IMAGE_SITE="/opt/venv/lib/python3.12/site-packages"
 
 MODE=install
@@ -159,6 +165,15 @@ preflight() {
         command -v docker >/dev/null \
             || die "docker is required for --kernel-from-image (the kernel wheel is extracted from the image).
       Use --kernel-from-source to build it instead; that path needs no docker."
+        # `docker image inspect` also fails when the socket is not reachable, which
+        # used to be reported as "image not present" and sent people to re-pull an
+        # image they already had. Separate the two causes.
+        if ! docker info >/dev/null 2>&1; then
+            die "cannot reach the docker daemon as $(id -un) (permission denied on
+      /var/run/docker.sock?). The scripts call bare \`docker\`, so group membership is
+      what matters, not sudo: \`sudo usermod -aG docker $(id -un)\` and then start a NEW
+      login session (this host has no newgrp/sg unless the \`login\` package is installed)."
+        fi
         if ! docker image inspect "$XPU_IMAGE" >/dev/null 2>&1; then
             die "image $XPU_IMAGE not present; run: docker pull $XPU_IMAGE"
         fi
@@ -238,6 +253,10 @@ build_kernel_from_source() {
         if ! ( set +u
                source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
                export PATH="/opt/intel/oneapi/compiler/$ONEAPI_VERSION/bin:$PATH"
+               # setvars re-pollutes LD_LIBRARY_PATH for icpx's sake; the venv's own
+               # libur_loader must still come first or any torch import in the build
+               # fails on urKernelSetArgLocal@LIBUR_LOADER_0.12.
+               export LD_LIBRARY_PATH="$SRC_VENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
                export OMNI_XPU_KERNEL_SOURCE="$OMNI_SRC"
                export CUTLASS_SYCL_ROOT="$SYCL_TLA_DIR"
                export OMNI_XPU_DEVICE="$XPU_TARGET"
