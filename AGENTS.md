@@ -16,11 +16,11 @@ instead of hunting for a suite.
 | `.venv-omni` | `./setup_vllm_omni_env.sh` | vLLM-Omni, when `OMNI_VENV=.venv-omni` |
 | `vendor/LTX-2/.venv` | `setup.sh` (torch **2.12.0**) | `ltx-gen.sh` only |
 
-The ComfyUI venv name does **not** propagate: `setup_comfyui_env.sh` honors
-`COMFY_VENV` (default `.venv-comfy`), `run_xpu_comfy.sh` reads a *different* variable
-`XPU_VENV` (default `.venv-xpu`), and `gen_video.sh` forwards neither — it reads
-`COMFY_VENV` for its own sanity check and JSON parsing but shells out to
-`run_xpu_comfy.sh` unchanged. Build straight into the default instead of fighting it:
+The three ComfyUI scripts now resolve the venv the same way — `COMFY_VENV` /
+`XPU_VENV` if set, else `.venv-xpu` if it exists, else `.venv-comfy` — so both installers'
+output is usable without exporting anything. (`gen_video.sh` still reads `COMFY_VENV` only
+for its own preflight and JSON parsing; the *server* venv is `run_xpu_comfy.sh`'s
+`XPU_VENV`.) Building straight into the repo default is still tidiest:
 
 ```bash
 COMFY_VENV=$PWD/.venv-xpu ./setup_comfyui_env.sh
@@ -282,6 +282,14 @@ raises no error — the same clip just takes 70.1 s/step instead of 47.2. Build 
 the wheel from `intel/llm-scaler-omni:0.2.0-b2`). ComfyUI 0.42 + torch 2.14 output is
 bit-identical to the 0.39 + torch 2.14.1 reference run, so the JZL nodes are forward
 compatible.
+
+The kernel's native `_C` also links **`libdnnl.so.3`**, and its wheel declares
+`onednn==2026.0.0`; the image ships only onednn's *dist-info*, so extracting it alone
+yields a kernel that imports fine yet reports `is_available() == False`, which surfaces as
+a bare `xpu backend False` / `int8 disabled` with no hint of the missing library.
+`setup_xpu_comfy.sh` now installs onednn from PyPI (its libs land in `<venv>/lib`, already
+on the pinned `LD_LIBRARY_PATH`), re-tests `is_available()` before skipping extraction on a
+rerun, and prints the swallowed `ImportError` when the kernel still fails to load.
 
 **Never load the whole 135 GiB H3 partition across many cards at once.** `device_map="balanced"`
 over 16 XPUs wedged three GPUs (`xe … device wedged, needs recovery`) and needed a

@@ -25,7 +25,18 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV="${COMFY_VENV:-$ROOT/.venv-xpu}"
+# COMFY_VENV wins, then .venv-xpu, then .venv-comfy (what setup_comfyui_env.sh builds).
+# Only the preflight and the JSON parsing below use this; the server venv is decided by
+# run_xpu_comfy.sh's own XPU_VENV, which falls back the same way.
+if [ -n "${COMFY_VENV:-}" ]; then
+    VENV="$COMFY_VENV"
+elif [ -d "$ROOT/.venv-xpu" ]; then
+    VENV="$ROOT/.venv-xpu"
+elif [ -d "$ROOT/.venv-comfy" ]; then
+    VENV="$ROOT/.venv-comfy"
+else
+    VENV="$ROOT/.venv-xpu"
+fi
 COMFY="$ROOT/vendor/ComfyUI"
 GPU="${XPU_GPU:-16}"
 PORT="${XPU_PORT:-8288}"

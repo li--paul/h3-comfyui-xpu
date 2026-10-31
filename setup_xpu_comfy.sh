@@ -169,6 +169,15 @@ preflight() {
         # used to be reported as "image not present" and sent people to re-pull an
         # image they already had. Separate the two causes.
         if ! docker info >/dev/null 2>&1; then
+            # Same re-exec trick as setup_comfyui_env.sh: the group is usually in
+            # /etc/group but not in this process (usermod after login).
+            if [ "${H3_DOCKER_SG:-0}" -eq 0 ] \
+               && id -nG "$(id -un)" 2>/dev/null | tr ' ' '\n' | grep -qx docker \
+               && command -v sg >/dev/null; then
+                export H3_DOCKER_SG=1
+                say "docker socket not reachable in this shell; re-running under 'sg docker'"
+                exec sg docker -c "cd $(printf '%q' "$PWD") && exec $(printf '%q ' "$0" "$@")"
+            fi
             die "cannot reach the docker daemon as $(id -un) (permission denied on
       /var/run/docker.sock?). The scripts call bare \`docker\`, so group membership is
       what matters, not sudo: \`sudo usermod -aG docker $(id -un)\` and then
@@ -315,11 +324,14 @@ copy_venv() {
 
 extract_kernel() {
     local sp="$VENV/lib/python3.12/site-packages"
-    if [ -d "$sp/omni_xpu_kernel" ] && [ "$FORCE" -eq 0 ]; then
-        say "omni_xpu_kernel already installed — skipping extraction"
+    # A rerun after a partial install used to be a no-op here, which left the venv
+    # with the kernel but no libdnnl.so.3 forever. Ask the kernel itself instead.
+    if [ "$FORCE" -eq 0 ] && [ -d "$sp/omni_xpu_kernel" ] \
+       && "$PY" -c 'import omni_xpu_kernel as o; raise SystemExit(0 if o.is_available() else 1)' 2>/dev/null; then
+        say "omni_xpu_kernel already installed and loadable — skipping extraction"
         return
     fi
-    say "extracting omni_xpu_kernel + onednn metadata from $XPU_IMAGE"
+    say "extracting omni_xpu_kernel from $XPU_IMAGE"
     docker rm -f xpu-setup-probe >/dev/null 2>&1 || true
     docker run -d --name xpu-setup-probe "$XPU_IMAGE" sleep 300 >/dev/null
     # shellcheck disable=SC2064
@@ -327,13 +339,21 @@ extract_kernel() {
 
     local names
     names="$(docker exec xpu-setup-probe bash -lc \
-        "ls $IMAGE_SITE | grep -iE '^omni_xpu_kernel|^onednn.*dist-info'" 2>/dev/null)"
+        "ls $IMAGE_SITE | grep -iE '^omni_xpu_kernel'" 2>/dev/null)"
     [ -n "$names" ] || die "could not list XPU packages inside $XPU_IMAGE"
     local n
     for n in $names; do
         docker cp "xpu-setup-probe:$IMAGE_SITE/$n" "$sp/" >/dev/null
         say "  installed $n"
     done
+
+    # omni_xpu_kernel._C links libdnnl.so.3 and the wheel declares onednn==$ONEDNN_VERSION,
+    # but the image only ships onednn's dist-info (its runtime lives in the image's own
+    # /opt/venv/lib). Copying that metadata made pip think onednn was present, so the venv
+    # ended up with a kernel that imported fine and still reported is_available() == False.
+    say "installing onednn==$ONEDNN_VERSION (provides libdnnl.so.3; the image has metadata only)"
+    rm -rf "$sp"/onednn*.dist-info
+    uv pip install --python "$PY" "onednn==$ONEDNN_VERSION" 2>&1 | tail -1
     docker rm -f xpu-setup-probe >/dev/null 2>&1 || true
 }
 
@@ -435,6 +455,13 @@ try:
     print("omni_xpu_kernel:", omni.__version__, "| target:", omni.__xpu_target__)
     kernel_ok = (omni.__xpu_target__ == "bmg" and got == want
                  and omni.is_available() and cute.is_available())
+    if not omni.is_available():
+        # is_available() swallows the ImportError; re-raise it here or a missing
+        # libdnnl.so.3 looks identical to a wheel built for another torch.
+        try:
+            omni._load_extension()
+        except Exception as exc:
+            print("kernel load    :", type(exc).__name__, "-", exc)
     # b3 moved Sol-Attn into a separate omni_xpu_sol_attn wheel. Without the
     # symbol, --sol still runs but is dense: 39.3 -> 47.2 s/step, no error.
     sol_ok = hasattr(cute, "sol_attn")
@@ -529,6 +556,6 @@ check_kitchen_versions
 build_provider
 install_node
 verify
-say "done. start ComfyUI with: ./run_xpu_comfy.sh --gpu 16 --port 8288"
+say "done. start ComfyUI with: ./run_xpu_comfy.sh --gpu ${XPU_GPU:-<card>} --port 8288"
 [ "$BENCH" -eq 1 ] && bench
 exit 0

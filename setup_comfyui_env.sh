@@ -108,6 +108,18 @@ else
       Install it (sudo apt-get install -y docker.io), or skip docker entirely:
         ./setup_comfyui_env.sh --kernel-from-source   # needs icpx, ~30-90 min"
     if ! docker info >/dev/null 2>&1; then
+        # Most common case by far: `usermod -aG docker` ran after this session logged
+        # in, so the group exists in /etc/group but not in this process. Re-exec under
+        # `sg` ourselves (same uid, same cwd, same argv) instead of making the caller
+        # remember to wrap every invocation. Guarded so it can only happen once.
+        if [ "${H3_DOCKER_SG:-0}" -eq 0 ] \
+           && id -nG "$(id -un)" 2>/dev/null | tr ' ' '\n' | grep -qx docker \
+           && command -v sg >/dev/null; then
+            export H3_DOCKER_SG=1
+            say "docker socket not reachable in this shell; re-running under 'sg docker'"
+            # shellcheck disable=SC2086
+            exec sg docker -c "cd $(printf '%q' "$PWD") && exec $(printf '%q ' "$0" "$@")"
+        fi
         die "cannot reach the docker daemon as $(id -un).
       Every script here calls bare \`docker\`, so this is group membership, not sudo:
         sudo usermod -aG docker $(id -un)     # once per user

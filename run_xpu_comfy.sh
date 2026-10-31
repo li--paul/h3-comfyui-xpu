@@ -34,7 +34,18 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV="${XPU_VENV:-$ROOT/.venv-xpu}"
+# XPU_VENV wins. Otherwise prefer .venv-xpu (the copy setup_xpu_comfy.sh makes from
+# .venv) and fall back to .venv-comfy (what setup_comfyui_env.sh builds), so the two
+# installers' outputs are both usable without exporting anything.
+if [ -n "${XPU_VENV:-}" ]; then
+    VENV="$XPU_VENV"
+elif [ -d "$ROOT/.venv-xpu" ]; then
+    VENV="$ROOT/.venv-xpu"
+elif [ -d "$ROOT/.venv-comfy" ]; then
+    VENV="$ROOT/.venv-comfy"
+else
+    VENV="$ROOT/.venv-xpu"   # nothing built yet; the error below names it
+fi
 # ~/.bashrc sources oneAPI setvars, whose libur_loader.so.0 then outranks the venv's
 # own (LD_LIBRARY_PATH beats DT_RUNPATH=$ORIGIN) and no longer exports
 # `urKernelSetArgLocal@LIBUR_LOADER_0.12` that intel-sycl-rt's libsycl.so.9 needs —
