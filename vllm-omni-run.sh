@@ -41,7 +41,22 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="$ROOT/vllm-omni-output"
 # Which venv holds vllm/vllm-omni. Override to use a dedicated env built by
 # setup_vllm_omni_env.sh (e.g. OMNI_VENV=$ROOT/.venv-omni).
-VENV="${OMNI_VENV:-$ROOT/.venv}"
+# Which venv holds vllm/vllm-omni: OMNI_VENV wins, then the standalone .venv-omni that
+# setup_vllm_omni_env.sh builds, then the combined .venv.
+if [ -n "${OMNI_VENV:-}" ]; then
+    VENV="$OMNI_VENV"
+elif [ -d "$ROOT/.venv-omni" ]; then
+    VENV="$ROOT/.venv-omni"
+else
+    VENV="$ROOT/.venv"
+fi
+# ~/.bashrc sources oneAPI setvars, whose libur_loader.so.0 no longer exports
+# urKernelSetArgLocal — the symbol the venv's intel-sycl-rt libsycl.so.9 imports — and
+# LD_LIBRARY_PATH outranks libsycl's RUNPATH=$ORIGIN. Without this every `import torch`
+# fails, and with `pipefail` the very first device probe aborts the script *silently*
+# (empty output, exit 1). Pin the venv's lib first; load_oneapi() re-prepends it after
+# sourcing setvars for the server.
+export LD_LIBRARY_PATH="$VENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 MODEL_ROOT="${MODEL_ROOT:-$HOME/work/models/MiniMax-H3}"
 LORA_DIR="${LORA_DIR:-$ROOT/h3_input/loras}"
 PIDFILE="$OUT_DIR/server.pid"
@@ -90,6 +105,11 @@ load_oneapi() {
     # shellcheck disable=SC1091
     source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
     set -u
+    # setvars puts oneAPI 2026.2's libur_loader ahead of the venv's own, and the venv's
+    # libsycl.so.9 needs the symbols that 2026.2 dropped (urKernelSetArgLocal), so every
+    # `import torch` then fails. Keep the venv's lib first, oneAPI's after it — the same
+    # ordering run_vllm_tp.sh uses.
+    export LD_LIBRARY_PATH="$VENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 }
 
 server_pid() {
@@ -244,7 +264,9 @@ cmd_serve() {
         # the engine dies deep inside worker init with a misleading
         # "device index is out of range".
         local avail
-        avail="$("$VENV/bin/python" -c 'import torch; print(torch.xpu.device_count())' 2>/dev/null | tail -1)"
+        avail="$("$VENV/bin/python" -c 'import torch; print(torch.xpu.device_count())' 2>/dev/null | tail -1 || true)"
+        [ -n "$avail" ] || die "cannot query torch.xpu with $VENV/bin/python (import torch failed).
+      A libsycl/libur_loader mismatch is the usual cause; see LD_LIBRARY_PATH above."
         if [[ "$avail" =~ ^[0-9]+$ ]]; then
             local id
             for id in ${gpu_ids//,/ }; do

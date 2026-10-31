@@ -262,6 +262,18 @@ Each mirrors the official vLLM-Omni XPU Docker build; do not "simplify" them:
   `采样完成` / `✅ 解码完成` lines instead.
 - TP=8 heavy allreduce can permanently drop a PCIe root port to Gen1 and only a power
   cycle recovers it — see `vllm_tp8_pcie_downgrade.md`.
+- **On this host every reference-image (ref2v) run aborts in `torch-xpu`.** Both harnesses
+  die on `Indexing.h:622 Assertion ... "index out of bounds"`: ComfyUI first in the
+  Qwen3-VL DeepStack inject (`comfy/text_encoders/llama.py:1066`), vLLM-Omni while binding
+  the reference image. t2v never enters that path, and it is the only mode that works —
+  ComfyUI t2v measures 300 s for 1376×768/124 f/8 steps on the B70 (`perf.md`,
+  2026-10-31). Don't chase this as a config problem: `OMNIXPU_ENABLE=0`, smaller
+  reference images and graph-capture flags change nothing, and patching those two ComfyUI
+  lines only moves the abort to `Indexing.cpp:627`.
+- **vLLM-Omni `t2va` is broken here regardless of prompt**: the encoder receives zero
+  token ids (`torch.cat` on an empty list at 1376×768; a ~4.3e9 GiB allocation at
+  512×288). The environment itself builds and serves fine (`setup_vllm_omni_env.sh` →
+  RESULT: PASS), so don't re-debug the install.
 
 ## Verified numbers (don't re-measure without a reason)
 

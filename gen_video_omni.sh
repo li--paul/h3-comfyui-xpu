@@ -168,10 +168,19 @@ say "generating ${WIDTH}x${HEIGHT}, ${DURATION}s, $STEPS steps, seed $SEED"
 OUT_FILE="$OUT_DIR/${MODE}_${WIDTH}x${HEIGHT}_${STEPS}step.mp4"
 [ -f "$OUT_FILE" ] || die "no artefact at $OUT_FILE"
 SIZE="$(stat -c%s "$OUT_FILE")"
-[ "$SIZE" -gt 1000000 ] || die "output is only ${SIZE} bytes — likely an error body: $OUT_FILE"
-say "wrote $OUT_FILE ($((SIZE / 1024 / 1024)) MiB)"
+# Size alone rejects a legitimate low-res smoke clip, so prefer a real probe.
+if command -v ffprobe >/dev/null 2>&1; then
+    NFRAMES="$(ffprobe -v error -select_streams v:0 -count_frames \
+        -show_entries stream=nb_read_frames -of csv=p=0 "$OUT_FILE" 2>/dev/null | tr -d ',')"
+    [ -n "$NFRAMES" ] && [ "$NFRAMES" -gt 0 ] \
+        || die "no decodable video stream in $OUT_FILE (${SIZE} bytes): $OUT_FILE"
+    say "wrote $OUT_FILE ($((SIZE / 1024 / 1024)) MiB, $NFRAMES frames)"
+else
+    [ "$SIZE" -gt 1000000 ] || die "output is only ${SIZE} bytes — likely an error body: $OUT_FILE"
+    say "wrote $OUT_FILE ($((SIZE / 1024 / 1024)) MiB)"
+fi
 
-"${OMNI_VENV:-$ROOT/.venv}/bin/python" - "$OUT_FILE" <<'PY' || true
+"${OMNI_VENV:-$ROOT/.venv-omni}/bin/python" - "$OUT_FILE" <<'PY' || true
 import sys
 try:
     import av, numpy as np

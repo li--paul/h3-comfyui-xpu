@@ -684,3 +684,56 @@ lands around mean 100–120 / std 65–75, a flat or dark failure well below tha
 - **ComfyUI at other step counts** — only the 8-step turbo LoRA is available;
   the 4-step artifact was not fetched.
 - **Concurrent requests** — all runtimes served one request at a time.
+
+## 2026-10-31 — single Intel Arc Pro B70 (this host)
+
+Different box from the tables above: **one** B70 (`0xe223`, 30.3 GiB, `xpu:0`;
+`/dev/dri/renderD129` — 128 is the iGPU), Ubuntu 26.04, oneAPI 2026.2,
+torch 2.14.0+xpu. ComfyUI 0.42.0 + `omni_xpu_kernel` 0.2.0b2 (`int8 enabled: True`),
+vLLM-Omni 0.32.0rc1 built from source into `.venv-omni`. Same prompt, seed 1001.
+
+| runtime | mode | config | wall | per step | artefact |
+|---|---|---|---:|---:|---|
+| ComfyUI + XPU kernel | t2v | `fl2va_pruned_fp8_scaled` DiT + nvfp4 encoder, 1376×768, 124 f, 8 steps | **300 s** | 37.5 s | 124 frames, AAC 32 kHz, frame mean 82.3–95.2 (std 57.6–65.5) |
+| ComfyUI + XPU kernel | ref2v | `ref2va_pruned_int8_convrot` DiT, same shape | — | — | aborts (1) |
+| vLLM-Omni, 1 card BF16 + DLO 2 | t2va | `FL2VA/` partition | — | — | aborts (2) |
+| vLLM-Omni, 1 card BF16 + DLO 2 | ref2va | `Ref2VA/` partition | — | — | aborts (1) |
+
+Peak VRAM was not captured for these runs.
+
+**What the numbers say.** 37.5 s/step on the B70 beats both earlier points at the
+same shape: the eager-int8 B70 baseline in `~/work/nv_h3` (40.3 s/step) and the
+stock B60 figure above (42 s/step). The clip is well exposed, so the int8 path
+through `omni_xpu_kernel` is working, not just fast.
+
+**(1) Any reference-image run aborts inside torch-xpu's indexing kernel.**
+
+```
+torch-xpu-ops .../ATen/native/xpu/sycl/Indexing.h:622:
+Assertion `index >= -sizes_[i] && index < sizes_[i] && "index out of bounds"` failed
+```
+
+- ComfyUI hits it twice: first in the Qwen3-VL DeepStack inject
+  (`comfy/text_encoders/llama.py:1066`, `x[visual_pos_masks] = ...`), then — once that
+  line is rewritten with `index_select`/`index_copy_` — in
+  `comfy/ldm/minimax/model.py:577` (`all_video_rows[~img_update] = ...`), and finally
+  `Indexing.cpp:627` on `index_copy_` itself.
+- vLLM-Omni's ref2va dies on the **same** assertion while binding the reference image,
+  so this is the runtime, not either harness.
+- Ruled out: the OmniXPU node (`OMNIXPU_ENABLE=0` behaves identically), reference-image
+  size (2752×1568 and 1376×784 both die), graph capture (`enable_graph` is gated on
+  `is_device_cuda`), and upstream code drift (ComfyUI master has the same line).
+- t2v never executes that path, which is why it is the one mode that works.
+  The `llama.py`/`model.py` patches used to reach the later crashes were reverted;
+  `vendor/` is unmodified.
+
+**(2) vLLM-Omni text-only (`t2va`) fails earlier and differently**: the text encoder
+receives zero token ids, so `_get_rope_index` calls `torch.cat` on an empty list at
+1376×768 (`pipeline_minimax_h3.py:1509` → `encoder.py:1077`), and the same request at
+512×288 tries to allocate ~4.3e9 GiB. The prompt does reach the server (`prompt` is the
+right form field) and the 8-step artifact guard rejects 2-step runs by design, so this
+is inside the pipeline rather than the harness.
+
+**Mode/partition pairing is enforced.** A Ref2VA adapter requested from an `fl2va`
+server returns HTTP 500: *"…is a Ref2VA Turbo artifact; start the server with
+--task-type ref2va"*. Switching modes does restart the server, as the top-level docs say.

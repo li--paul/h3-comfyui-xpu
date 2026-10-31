@@ -208,6 +208,13 @@ if [ -f /opt/intel/oneapi/setvars.sh ]; then
     set -u
 fi
 
+# setvars prepends oneAPI 2026.2's lib dir, and its libur_loader.so.0 no longer exports
+# urKernelSetArgLocal -- the symbol the venv's intel-sycl-rt libsycl.so.9 imports. Since
+# LD_LIBRARY_PATH outranks libsycl's RUNPATH=$ORIGIN, vllm's setup.py dies on
+# `import torch` inside the build (no-build-isolation means that build runs in $VENV).
+# Put the venv's lib first and leave oneAPI's behind it: icpx still resolves, torch works.
+export LD_LIBRARY_PATH="$VENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
 "$UV_BIN" python install "$PYTHON_BIN" >/dev/null 2>&1 || true
 
 say "syncing $PROJ_DIR into $VENV"

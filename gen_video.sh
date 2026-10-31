@@ -211,7 +211,10 @@ GEN_EXTRA=()
 [ "$SOL" -eq 1 ] && GEN_EXTRA+=(--sol)
 SECS="$(awk "BEGIN{printf \"%.2f\", $LENGTH/$FPS}")"
 say "generating ${WIDTH}x${HEIGHT}, ${SECS}s ($LENGTH frames @ $FPS fps), $STEPS steps, seed $SEED, sol=$SOL"
-COMFY_URL="http://127.0.0.1:$PORT" "$ROOT/.venv/bin/python" "$ROOT/comfyui_h3_gen.py" \
+# comfyui_h3_gen.py is stdlib-only, so any of our venvs can run it; use the same one
+# $VENV already resolved instead of hardcoding .venv (which a ComfyUI-only host may
+# never have built).
+COMFY_URL="http://127.0.0.1:$PORT" "$VENV/bin/python" "$ROOT/comfyui_h3_gen.py" \
     --mode "$MODE" \
     --prompt-file "$PROMPT_FILE" \
     --prefix "$PREFIX" \
@@ -229,8 +232,24 @@ NEWEST="$(find "$OUT_DIR" -maxdepth 1 -name "*${PREFIX}*.mp4" -printf '%T@ %p\n'
     | sort -rn | head -1 | cut -d' ' -f2-)"
 [ -n "$NEWEST" ] || die "no ${PREFIX}*.mp4 in $OUT_DIR (the job reported success)"
 SIZE="$(stat -c%s "$NEWEST")"
-[ "$SIZE" -gt 1000000 ] || die "output is only ${SIZE} bytes — likely an error body, not a video: $NEWEST"
-say "wrote $NEWEST ($((SIZE/1024/1024)) MiB)"
+# Size alone is a bad proxy: a legitimate 512x288 smoke clip is ~800 kB and used to be
+# rejected as "an error body". Ask ffprobe when it exists, and keep the size check only
+# as a fallback for hosts without it.
+FRAMES=""; HAS_AUDIO=""
+if command -v ffprobe >/dev/null 2>&1; then
+    FRAMES="$(ffprobe -v error -select_streams v:0 -count_frames \
+        -show_entries stream=nb_read_frames -of csv=p=0 "$NEWEST" 2>/dev/null | tr -d ',')"
+    HAS_AUDIO="$(ffprobe -v error -select_streams a -show_entries stream=index \
+        -of csv=p=0 "$NEWEST" 2>/dev/null | head -1)"
+    [ -n "$FRAMES" ] && [ "$FRAMES" -gt 0 ] \
+        || die "no decodable video stream in $NEWEST (${SIZE} bytes) — ComfyUI reported success"
+    [ "$FRAMES" -eq "$LENGTH" ] || warn "decoded $FRAMES frames, expected $LENGTH"
+    [ -n "$HAS_AUDIO" ] || warn "no audio stream in $NEWEST (H3 should always emit AAC)"
+    say "wrote $NEWEST ($((SIZE/1024/1024)) MiB, $FRAMES frames, audio=$([ -n "$HAS_AUDIO" ] && echo yes || echo NO))"
+else
+    [ "$SIZE" -gt 1000000 ] || die "output is only ${SIZE} bytes — likely an error body, not a video: $NEWEST"
+    say "wrote $NEWEST ($((SIZE/1024/1024)) MiB)"
+fi
 
 if [ "$KEEP_SERVER" -eq 0 ]; then
     fuser -k "$PORT/tcp" >/dev/null 2>&1 || true
