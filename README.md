@@ -374,6 +374,28 @@ What is **not** interchangeable between the two:
   (`lora.py:298` rejects `MODEL_LEVEL` and `LAYER_WISE`, but not
   `DISTRIBUTED_LAYER_WISE`).
 
+### all_reduce stress test
+
+`run_dist_allreduce.sh` drives `dist_allreduce.py`: sustained multi-rank XPU
+`all_reduce` at 8192x4096 bf16, the shape that reproduces GPU hangs. It verifies
+correctness against an analytic sum first, then times `steps x calls_per_step`.
+
+```bash
+./run_dist_allreduce.sh                       # 4 ranks on XPU 16-19
+./run_dist_allreduce.sh --ranks 8             # 8 ranks on XPU 16-23
+./run_dist_allreduce.sh --timeout 600 -- --steps 50 --calls-per-step 8
+```
+
+XPU 0-15 are refused on purpose — this box reserves them. The wrapper sets
+`LD_LIBRARY_PATH` and `FI_PROVIDER_PATH` itself; without both, torch fails to
+import (`urKernelSetArgLocal`, LIBUR_LOADER_0.12) and oneCCL finds no libfabric
+providers. A timeout is reported as a hang, and the kernel log is checked for
+`exec queue reset` / `DEVICE_LOST` produced *during* the run.
+
+> 8-rank sustained all_reduce is the shape that once dropped a PCIe root port to
+> Gen1 permanently (`vllm_tp8_pcie_downgrade.md`); only a power cycle recovered
+> it. Raise `--ranks` deliberately.
+
 ### Performance
 
 Full measurements — quantization, step counts, memory, and the quality verdict
