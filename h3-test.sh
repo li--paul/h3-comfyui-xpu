@@ -24,6 +24,11 @@ IN_DIR="${H3_INPUT:-$ROOT/h3_input}"
 TEMPLATE="$IN_DIR/prompts/jzl_shot1_api.json"
 COMFY="$ROOT/vendor/ComfyUI"
 PY="$ROOT/.venv/bin/python"
+# ~/.bashrc sources oneAPI setvars, whose libur_loader.so.0 then outranks the venv's
+# own (LD_LIBRARY_PATH beats DT_RUNPATH=$ORIGIN) and no longer exports
+# `urKernelSetArgLocal@LIBUR_LOADER_0.12` that intel-sycl-rt's libsycl.so.9 needs,
+# so `import torch` fails before ComfyUI starts. See run_vllm_tp.sh for the same rule.
+export LD_LIBRARY_PATH="$ROOT/.venv/lib"
 H3_MODELS="${H3_MODELS:-$HOME/work/models/ComfyUI-MiniMax-H3}"
 PORT="${PORT:-8190}"
 TIMEOUT="${TIMEOUT:-2400}"

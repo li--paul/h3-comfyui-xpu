@@ -34,12 +34,36 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV="${XPU_VENV:-$ROOT/.venv-xpu}"
+# XPU_VENV wins. Otherwise prefer .venv-xpu (the copy setup_xpu_comfy.sh makes from
+# .venv) and fall back to .venv-comfy (what setup_comfyui_env.sh builds), so the two
+# installers' outputs are both usable without exporting anything.
+if [ -n "${XPU_VENV:-}" ]; then
+    VENV="$XPU_VENV"
+elif [ -d "$ROOT/.venv-xpu" ]; then
+    VENV="$ROOT/.venv-xpu"
+elif [ -d "$ROOT/.venv-comfy" ]; then
+    VENV="$ROOT/.venv-comfy"
+else
+    VENV="$ROOT/.venv-xpu"   # nothing built yet; the error below names it
+fi
+# ~/.bashrc sources oneAPI setvars, whose libur_loader.so.0 then outranks the venv's
+# own (LD_LIBRARY_PATH beats DT_RUNPATH=$ORIGIN) and no longer exports
+# `urKernelSetArgLocal@LIBUR_LOADER_0.12` that intel-sycl-rt's libsycl.so.9 needs —
+# torch fails to import. Keep the loader search inside the venv (see run_vllm_tp.sh).
+export LD_LIBRARY_PATH="$VENV/lib"
+# The AIMDO XPU provider's linux default is its native_hook mode, which must be
+# LD_PRELOADed before Python starts — impossible from inside ComfyUI, where torch is
+# already imported. `global` applies the same control overlay (aimdo_xpu.so instead of
+# the CUDA library) without the preload, and is the mode the provider admits here.
+export AIMDO_XPU_ALLOCATOR_MODE="${AIMDO_XPU_ALLOCATOR_MODE:-global}"
 COMFY="$ROOT/vendor/ComfyUI"
 GPU="${XPU_GPU:-16}"
 PORT="${XPU_PORT:-8288}"
 OUT="$ROOT/h3_output/xpu_comfy"
-IN_DIR="$ROOT/h3_input/assets"
+# ComfyUI writes API-uploaded reference images into --input-directory, so this must not
+# be a tracked directory: with h3_input/assets the uploads showed up in `git status`.
+# vendor/ is gitignored and ComfyUI's own input/ is the natural place for them.
+IN_DIR="${XPU_INPUT_DIR:-$ROOT/vendor/ComfyUI/input}"
 EXTRA=()
 BUILD_KERNEL="${XPU_KERNEL_AUTOBUILD:-0}"
 # Empty means "use ComfyUI's own extra_model_paths.yaml". Set it (or pass
@@ -64,7 +88,8 @@ done
 
 [ -x "$VENV/bin/python" ] || die "$VENV not found — run ./setup_xpu_comfy.sh first"
 [ -d "$COMFY" ] || die "$COMFY not found — run ./setup.sh first"
-[ -d "$IN_DIR" ] || die "input assets missing: $IN_DIR"
+mkdir -p "$IN_DIR"
+[ -d "$IN_DIR" ] || die "input directory missing and could not be created: $IN_DIR"
 
 # The XPU index maps to /dev/dri/renderD(128+index) on this host. Override with
 # RENDER_NODE=... on a different topology.

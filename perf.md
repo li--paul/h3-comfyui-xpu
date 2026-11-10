@@ -684,3 +684,113 @@ lands around mean 100–120 / std 65–75, a flat or dark failure well below tha
 - **ComfyUI at other step counts** — only the 8-step turbo LoRA is available;
   the 4-step artifact was not fetched.
 - **Concurrent requests** — all runtimes served one request at a time.
+
+## 2026-10-31 — single Intel Arc Pro B70 (this host)
+
+Different box from the tables above: **one** B70 (`0xe223`, 30.3 GiB, `xpu:0`;
+`/dev/dri/renderD129` — 128 is the iGPU), Ubuntu 26.04, oneAPI 2026.2,
+torch 2.14.0+xpu. ComfyUI 0.42.0 + `omni_xpu_kernel` 0.2.0b2 (`int8 enabled: True`),
+vLLM-Omni 0.32.0rc1 built from source into `.venv-omni`. Same prompt, seed 1001.
+
+| runtime | mode | config | wall | per step | artefact |
+|---|---|---|---:|---:|---|
+| ComfyUI + XPU kernel | t2v | `fl2va_pruned_fp8_scaled` DiT + nvfp4 encoder, 1376×768, 124 f, 8 steps | **300 s** | 37.5 s | 124 frames, AAC 32 kHz, frame mean 82.3–95.2 (std 57.6–65.5) |
+| ComfyUI + XPU kernel | ref2v | `ref2va_pruned_int8_convrot` DiT, same shape | **280 s** | 35 s | 124 frames, AAC 32 kHz, frame mean 106.7–111.6 (std 61) — needs fix (1) |
+| vLLM-Omni, 1 card BF16 + DLO 2 | t2va | `FL2VA/` partition | — | — | aborts (2) |
+| vLLM-Omni, 1 card BF16 + DLO 2 | ref2va | `Ref2VA/` partition | — | — | aborts (3) |
+
+Peak VRAM was not captured for these runs.
+
+**What the numbers say.** 37.5 s/step on the B70 beats both earlier points at the
+same shape: the eager-int8 B70 baseline in `~/work/nv_h3` (40.3 s/step) and the
+stock B60 figure above (42 s/step). The clip is well exposed, so the int8 path
+through `omni_xpu_kernel` is working, not just fast.
+
+**(1) `torch.nonzero` returns wrong indices on this runtime, which is what broke every
+reference-image run.** The symptom is an abort far away from the cause:
+
+```
+torch-xpu-ops .../ATen/native/xpu/sycl/Indexing.h:622:
+Assertion `index >= -sizes_[i] && index < sizes_[i] && "index out of bounds"` failed
+```
+
+The minimal repro needs no ComfyUI and no weights:
+
+```python
+m = torch.zeros(176, dtype=torch.bool, device="xpu"); m[7:151] = True
+m.nonzero(as_tuple=True)[0].cpu()   # 144 values, but the tail is garbage: [..., 1, 1, 1]
+m.cpu().nonzero(as_tuple=True)[0]   # the correct, sorted list
+```
+
+`mask.sum()` is right (`144`), the mask round-trips correctly, and the index list starts
+correctly — only the tail is wrong and unsorted. Length-dependent: 64 is fine, 65–1000
+are broken, 4096 and 41042 are fine. Boolean-mask **writes** convert the mask through
+`nonzero` and therefore abort in the index kernel; boolean-mask **reads** convert the
+same way and fail *silently*, returning the wrong rows.
+
+That is why the failure looked so arbitrary:
+
+- ComfyUI ref2v does three such mask writes — the Qwen3-VL DeepStack inject
+  (`comfy/text_encoders/llama.py:1066`) and the two `_embed_and_pack` scatters
+  (`comfy/ldm/minimax/model.py:577`, `:582`) — and dies on the first one.
+- t2v never builds a boolean mask, so it was unaffected.
+- vLLM-Omni's ref2va dies on the **same** assertion from its own mask use, which is why
+  the suspicion moved to the runtime rather than either harness.
+- Ruled out along the way: the OmniXPU node (`OMNIXPU_ENABLE=0` identical), reference
+  image size (2752×1568 and 1376×784 both die), graph capture (`enable_graph` is gated on
+  `is_device_cuda`), and upstream code drift (ComfyUI master has the same line).
+
+Fix: `setup_xpu_comfy.sh` now patches those three call sites to compute the index list on
+the CPU (`mask.cpu().nonzero(...)`) and use `index_select`/`index_copy_`. A boolean mask is
+tiny, so the cost is not measurable; with it, ref2v runs at 35 s/step and the clip is
+correct. The patch is idempotent and lives in the script, not in `vendor/`.
+
+**(2) vLLM-Omni text-only (`t2va`) fails earlier and differently**: the text encoder
+receives zero token ids, so `_get_rope_index` calls `torch.cat` on an empty list at
+1376×768 (`pipeline_minimax_h3.py:1509` → `encoder.py:1077`), and the same request at
+512×288 tries to allocate ~4.3e9 GiB. The prompt does reach the server (`prompt` is the
+right form field) and the 8-step artifact guard rejects 2-step runs by design, so this
+is inside the pipeline rather than the harness.
+
+**(3) vLLM-Omni ref2va: the same `nonzero` primitive, and then one of ours.** The H3
+encoder and denoise loop do the same masked selects and writes, so `setup_vllm_omni_env.sh`
+now applies the CPU-index rewrite to every one of them (34 hunks across
+`encoder.py`, `minimax_h3_transformer.py`, `denoise_loop.py`, `latent_mask.py` and
+`pipeline_minimax_h3.py`). With that, encoding completes and sampling starts; the
+index-kernel assertion no longer appears.
+
+Two things are worth recording from the iterations, because both looked like product bugs
+and were not:
+
+- The first shape error (`tensor a (1045)` vs `(1024)` in `_deepstack_process`) came from the
+  rewrite itself: `hidden_states` is `[1, seq, D]`, not `[seq, D]`, so the mask has to be
+  applied along dim 1. The "constant 21-row excess" that suggested missing video
+  placeholders was just the sequence length versus the number of true positions — there is
+  no video mask in a ref2va request at all. The rewrite now picks the dim whose size
+  matches the mask, and the `_masked_feature_guard` hunk stays only as a defensive check.
+- `denoise_loop.py` indexes rows by masks in a dozen places (`v_video[update]`,
+  `video_rows[~update] = cond_anchor`, …). Patching only the encoder moves the abort into
+  the first denoise step, which is why the patch covers the loop as well.
+
+**Why single-card vLLM-Omni is not usable on this host.** A 512×288 ref2va request had not
+finished its first denoising step after 22 minutes (22:42 runtime, tqdm still `0/8`) on a
+second attempt, and after 25 minutes on the first, with
+`--enable-distributed-layerwise-offload --dlo-resident-layers 2`. The reason is memory
+capacity, not a bug: the worker reached **98.9 GiB RSS** within two minutes while the box
+had **183 GiB RAM, 1 GiB free and only 41 GiB of page cache** — the 135 GiB FL2VA partition
+(plus the 62 GiB text encoder) cannot stay cached, so every step re-reads weights from
+NVMe. The benchmark host for the tables above had 2 TB of RAM. ComfyUI has no such problem
+because its pruned `int8_convrot` DiT is 21 GB and stays resident, which is why the same
+class of shot costs 280 s there. Treat multi-GPU (TP2 + 12 resident layers) or a
+large-memory host as the requirement for vLLM-Omni; on one card of this box it is
+measurable but not practical.
+
+`--profile smoke` (2 steps, no LoRA, 1024×576) does not work here either: it fails in
+`pipeline_minimax_h3.py` with `value tensor of shape [1024, 96] cannot be broadcast to
+indexing result of shape [0, 96]`, i.e. the conditioning branch it builds has an empty
+update mask. That is independent of the workarounds above (the 8-step turbo path passes
+that point and reaches sampling).
+
+**Mode/partition pairing is enforced.** A Ref2VA adapter requested from an `fl2va`
+server returns HTTP 500: *"…is a Ref2VA Turbo artifact; start the server with
+--task-type ref2va"*. Switching modes does restart the server, as the top-level docs say.
