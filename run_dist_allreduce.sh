@@ -116,7 +116,10 @@ unset ZE_AFFINITY_MASK CCL_ATL_TRANSPORT 2>/dev/null || true
 export LD_LIBRARY_PATH="$FI_LIB_DIR:$VENV/lib"
 export FI_PROVIDER_PATH="$FI_LIB_DIR/libfabric"
 export CCL_ROOT="$VENV"
-export CCL_SYCL_COPY_ENGINE="${CCL_SYCL_COPY_ENGINE:-1}"
+# Forced to 0, not overridable: that is oneCCL's own default, so the run takes
+# the plain data path instead of the SYCL copy-engine path. dist_allreduce.py's
+# header suggests 1; this wrapper overrides that deliberately.
+export CCL_SYCL_COPY_ENGINE=0
 export ZE_AFFINITY_MASK="$GPU_IDS"
 export PYTHONUNBUFFERED=1
 

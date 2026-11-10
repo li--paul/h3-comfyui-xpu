@@ -70,7 +70,7 @@ Set explicitly, every run, rather than inherited:
 | `LD_LIBRARY_PATH` | `<oneAPI libfabric>:<venv>/lib` | *Replaced*, not extended. The venv's `libsycl.so.9` (`intel-sycl-rt` 2026.1.0) needs the `libur_loader` that ships beside it; a newer oneAPI puts its own first and the import dies with `undefined symbol: urKernelSetArgLocal, version LIBUR_LOADER_0.12` |
 | `FI_PROVIDER_PATH` | `<oneAPI libfabric>/libfabric` | The venv ships libfabric's *core* library only, and its build differs from oneAPI's. Without the plugin path oneCCL reports `fi_getinfo error: ret -61, providers 0` |
 | `CCL_ROOT` | `<venv>` | The wheel keeps the real `libccl.so` in `<venv>/lib`; the "documented" plugin path only has the static archive |
-| `CCL_SYCL_COPY_ENGINE` | `1` | Requested by the stress test's own header |
+| `CCL_SYCL_COPY_ENGINE` | `0` | Forced, not overridable. `0` is oneCCL's own default, so the run takes the plain data path; `dist_allreduce.py`'s header suggests `1`, and this wrapper overrides that on purpose |
 | `ZE_AFFINITY_MASK` | the resolved id list | Pins the cards; `torch.xpu.set_device(LOCAL_RANK)` then maps rank *n* to the *n*-th masked device |
 
 `CCL_ATL_TRANSPORT` is unset first, so a stray `=mpi` cannot break a `torchrun`
