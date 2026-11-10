@@ -396,6 +396,10 @@ providers. A timeout is reported as a hang, and the kernel log is checked for
 > Gen1 permanently (`vllm_tp8_pcie_downgrade.md`); only a power cycle recovered
 > it. Raise `--ranks` deliberately.
 
+Full usage, the two library problems the wrapper works around, how to read the
+per-step percentiles, and the troubleshooting table are in
+**[all_reduce_readme.md](all_reduce_readme.md)**.
+
 ### Performance
 
 Full measurements — quantization, step counts, memory, and the quality verdict
@@ -442,6 +446,11 @@ vLLM-Omni path:
 - `setup_vllm_omni_env.sh` — build `.venv-omni` from scratch (compiles vllm)
 - `gen_video_omni.sh` — project-directory entry point for the same two modes
 - `vllm-omni-run.sh` — lower-level driver (`download` / `serve` / `generate` / `run` / `stop` / `status`)
+
+Diagnostics:
+
+- `run_dist_allreduce.sh` + `dist_allreduce.py` — multi-rank XPU `all_reduce` stress test
+- `all_reduce_readme.md` — its usage, the library problems it works around, troubleshooting
 
 Shared:
 

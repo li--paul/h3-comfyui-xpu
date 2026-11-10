@@ -340,4 +340,8 @@ Full tables (quantization × steps × memory × quality) are in `perf.md` (Engli
   diffusers oracle harness itself is external (`~/work/simon/h3/minimax-h3-diffuser`,
   not in this repo)
 - `ltx-gen.md` — LTX CLI guide · `vllm_tp8_pcie_downgrade.md` — PCIe downgrade record
+- `run_dist_allreduce.sh` + `dist_allreduce.py` — multi-rank XPU `all_reduce` stress test;
+  usage and troubleshooting in `all_reduce_readme.md`. It sets `LD_LIBRARY_PATH`,
+  `FI_PROVIDER_PATH`, `CCL_ROOT` and `ZE_AFFINITY_MASK` itself, refuses XPU 0-15, and
+  reports a timeout as a hang. Defaults to 4 ranks on purpose — see the PCIe record above.
 - `vendor/LTX-2/packages/ltx-pipelines/src/ltx_pipelines/CLAUDE.md` — upstream LTX conventions
